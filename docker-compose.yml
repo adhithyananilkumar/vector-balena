@@ -1,4 +1,6 @@
 ---
+# keep the original Docker project name so existing volumes/data survive the folder rename
+name: proto-fleet
 version: '2.4'
 
 volumes:
@@ -366,3 +368,32 @@ services:
       retries: 5
     labels:
       io.balena.features.sysfs: 1
+
+  # https://github.com/ob-community/open-balena-postgrest
+  # admin-UI data access; JWT secret is read from the shared secrets volume at start
+  postgrest:
+    <<: *base-service
+    build: ../open-balena-postgrest
+    depends_on:
+      - api
+      - db
+    volumes:
+      - resin-data:/balena:ro
+    ports:
+      - "127.0.0.1:3002:8000"
+    environment:
+      PGRST_DB_URI: postgres://docker:docker@db:5432/resin
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: docker
+      OPENBALENA_DB_ROLE: docker
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        until [ -s /balena/$${DNS_TLD}.env ]; do sleep 2; done
+        set -a; . /balena/$${DNS_TLD}.env; set +a
+        export PGRST_JWT_SECRET="$$JSON_WEB_TOKEN_SECRET"
+        exec tini -- bash start.sh
+
+networks:
+  default:
+    name: open-balena_default

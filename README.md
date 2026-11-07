@@ -1,6 +1,14 @@
 [![Flowzone](https://github.com/balena-io/open-balena/actions/workflows/flowzone.yml/badge.svg)](https://github.com/balena-io/open-balena/actions/workflows/flowzone.yml)
 
-![](./docs/images/openbalena-logo.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/images/vector-logo-dark.png">
+    <img src="./docs/images/vector-logo-light.png" alt="Protoform Vector" width="420">
+  </picture>
+</p>
+
+**Vector** is Protoform's fleet management platform. This repository is the backend, built on
+[openBalena](https://github.com/balena-io/open-balena) (AGPL-3.0). Credit to the openBalena authors.
 
 [![deploy button](https://balena.io/deploy.svg)](https://dashboard.balena-cloud.com/deploy?repoUrl=https://github.com/balena-io/open-balena)
 

@@ -10,6 +10,8 @@ volumes:
   cert-manager-data: {}
   certs-data: {}
   db-data: {}
+  delta-engine: {}
+  delta-rsync: {}
   pki-data: {}
   redis-data: {}
   resin-data: {}
@@ -132,6 +134,22 @@ services:
       REGISTRY2_STORAGEPATH: /data
       TOKENS_CONFIG: REGISTRY2_SECRETKEY:hex
 
+  # https://github.com/ob-community/open-balena-delta (community, not part of balena's openBalena)
+  # Builds and serves delta images for devices with BALENA_SUPERVISOR_DELTA=1.
+  # Runs its own balena-engine daemon, so it needs privileged mode.
+  delta:
+    <<: *base-service
+    build: src/delta
+    privileged: true
+    depends_on:
+      - registry
+      - haproxy
+    volumes:
+      - certs-data:/certs
+      - resin-data:/balena:ro
+      - delta-engine:/var/lib/balena-engine
+      - delta-rsync:/delta-rsync
+
   # https://github.com/balena-io/open-balena-vpn
   vpn:
     <<: [
@@ -152,6 +170,9 @@ services:
       VPN_PORT: 443 # also used in balena-io/open-balena-vpn: config/confd/templates/haproxy.cfg.tmpl
       VPN_SERVICE_REGISTER_INTERFACE: eth0 # ensure correct service instance IP is registered with the API
       PRODUCTION_MODE: "true" # always true, as there is no src folder, only build/src
+    # CONNECT proxy used by the Vector UI server for terminal / SFTP access to devices (loopback only)
+    ports:
+      - "127.0.0.1:3128:3128"
     devices:
       - /dev/net/tun
 

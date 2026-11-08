@@ -5,7 +5,7 @@ server so devices download only the binary difference between the image they run
 It is not part of balena's openBalena and is not officially supported.
 
 ## What is added
-- `delta` service (`src/delta`): wraps `obcommunity/open-balena-delta`. Runs its own balena-engine
+- `delta` service (`src/delta`): vendored source of the community delta server, built in-repo (see `src/delta/NOTICE.md`). Runs its own balena-engine
   daemon, so it is `privileged`. Trusts the stack CA, reads the builder token from `/balena`, and
   verifies device JWTs with the API public certificate. The wrapper also stops the upstream server
   from logging bearer tokens.

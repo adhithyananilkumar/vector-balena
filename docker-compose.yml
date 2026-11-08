@@ -11,6 +11,7 @@ volumes:
   certs-data: {}
   db-data: {}
   delta-engine: {}
+  delta-data: {}
   delta-rsync: {}
   pki-data: {}
   redis-data: {}
@@ -141,6 +142,9 @@ services:
     <<: *base-service
     build: src/delta
     privileged: true
+    ports:
+      # build records for the Vector server on the same host (needs the derived key); devices use haproxy
+      - "127.0.0.1:3003:80"
     depends_on:
       - registry
       - haproxy
@@ -148,6 +152,7 @@ services:
       - certs-data:/certs
       - resin-data:/balena:ro
       - delta-engine:/var/lib/balena-engine
+      - delta-data:/data
       - delta-rsync:/delta-rsync
 
   # https://github.com/balena-io/open-balena-vpn

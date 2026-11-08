@@ -26,3 +26,9 @@ balena env set BALENA_SUPERVISOR_DELTA_VERSION 3 --fleet <fleet>
   normal full pull.
 - Pin base images by digest. If a base tag moves, deltas shrink little (upstream limitation).
 - Keep ~2x the app size free on devices.
+
+## Build records
+The server keeps a record of every delta it builds (`delta-data` volume, `/data/records.json`): the
+two releases, status, pull/diff/push times, compressed sizes and the devices that asked. The Vector UI
+shows them under Provision > Delta builds. Vector reads them from `127.0.0.1:3003` (or
+`VECTOR_DELTA_URL`) with a key derived from the stack's JSON web token secret; devices cannot read them.

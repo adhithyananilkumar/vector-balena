@@ -90,7 +90,7 @@ const parseDeltaParams = (src: string, dest: string) => {
   const deltaFull = `v${destRegVer}/${deltaBase}`;
   const delta = `${regHost}/${deltaFull}`;
 
-  return { deltaBase, deltaFull, delta };
+  return { deltaBase, deltaFull, delta, srcImgBase: String(srcImgBase), destImgBase: String(destImgBase) };
 };
 
 // Helper function to wait for dockerode stream to finish
@@ -119,6 +119,111 @@ const building = async (buildingFile: string, retryDelay: number) => {
   return buildingNow;
 };
 
+// ---- build records (shown in the Vector UI) ----
+interface DeltaRecord {
+  id: string;
+  srcImage: string;
+  destImage: string;
+  deltaImage: string;
+  status: 'building' | 'ready' | 'failed';
+  error?: string;
+  firstRequestedAt: number;
+  lastRequestedAt: number;
+  requests: number;
+  devices: string[];
+  startedAt?: number;
+  finishedAt?: number;
+  buildMs?: number;
+  pullMs?: number;
+  diffMs?: number;
+  pushMs?: number;
+  srcBytes?: number;
+  destBytes?: number;
+  deltaBytes?: number;
+}
+const dataDir = process.env.DELTA_DATA_DIR ?? '/data';
+const recordsFile = `${dataDir}/records.json`;
+let records: DeltaRecord[] = [];
+try {
+  records = JSON.parse(fs.readFileSync(recordsFile, 'utf8'));
+} catch (e) {
+  records = [];
+}
+records.forEach((r) => {
+  if (r.status === 'building') {
+    r.status = 'failed';
+    r.error = 'The delta server restarted during the build.';
+    r.finishedAt = Date.now();
+  }
+});
+const saveRecords = () => {
+  try {
+    if (records.length > 500) records = records.slice(-500);
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(recordsFile, JSON.stringify(records));
+  } catch (e) {
+    log(`Unable to save records: ${e.message}`);
+  }
+};
+const deviceOf = (token: string): string | undefined => {
+  const payload = jwt.decode(token) as { sub?: string } | null;
+  return payload && payload.sub ? String(payload.sub) : undefined;
+};
+// Note a request for a delta; creates the record on first sight.
+const noteRequest = (
+  init: { srcImage: string; destImage: string; deltaImage: string },
+  token: string
+): DeltaRecord => {
+  const now = Date.now();
+  let rec = records.find((r) => r.deltaImage === init.deltaImage);
+  if (!rec) {
+    rec = {
+      id: crypto.randomUUID(),
+      ...init,
+      status: 'ready',
+      firstRequestedAt: now,
+      lastRequestedAt: now,
+      requests: 0,
+      devices: [],
+    };
+    records.push(rec);
+  }
+  rec.requests += 1;
+  rec.lastRequestedAt = now;
+  const device = deviceOf(token);
+  if (device && rec.devices.indexOf(device) < 0) rec.devices.push(device);
+  saveRecords();
+  return rec;
+};
+
+// Compressed size of an image in the registry, from its manifest.
+const manifestBytes = async (ref: string): Promise<number | undefined> => {
+  const tmpWorkdir = `/tmp/${crypto.randomUUID()}`;
+  fs.mkdirSync(`${tmpWorkdir}/.docker`, { recursive: true });
+  fs.writeFileSync(`${tmpWorkdir}/.docker/config.json`, authFile);
+  try {
+    const child = spawn('docker', ['manifest', 'inspect', ref], {
+      cwd: tmpWorkdir,
+      env: { DOCKER_CONFIG: `${tmpWorkdir}/.docker` },
+    });
+    let out = '';
+    child.stdout.on('data', (d) => {
+      out += d;
+    });
+    if ((await once(child, 'close'))?.[0] !== 0) return undefined;
+    const manifest = JSON.parse(out);
+    const layers = (manifest.layers ?? []) as Array<{ size?: number }>;
+    return (
+      layers.reduce((sum, l) => sum + (l.size ?? 0), 0) +
+      ((manifest.config && manifest.config.size) || 0)
+    );
+  } catch (e) {
+    return undefined;
+  } finally {
+    fs.rmSync(tmpWorkdir, { recursive: true, force: true });
+  }
+};
+
 // Helper function to check if image exists in registry using manifest inspect
 const deltaExists = async (delta: string) => {
   const tmpWorkdir = `/tmp/${crypto.randomUUID()}`;
@@ -140,6 +245,7 @@ async function createHttpServer(listenPort: number) {
 
   app.get('/api/v3/delta', async (req, res) => {
     let buildingFile;
+    let rec: DeltaRecord | undefined;
     log('V3 delta request received');
 
     try {
@@ -152,7 +258,14 @@ async function createHttpServer(listenPort: number) {
         jwt.verify(token, pub, { algorithms: [alg] });
       }
 
-      const { deltaBase, delta } = parseDeltaParams(src, dest);
+      const { deltaBase, delta, srcImgBase, destImgBase } = parseDeltaParams(
+        src,
+        dest
+      );
+      rec = noteRequest(
+        { srcImage: srcImgBase, destImage: destImgBase, deltaImage: delta },
+        token
+      );
 
       buildingFile = `/tmp/${deltaBase}`;
 
@@ -182,6 +295,13 @@ async function createHttpServer(listenPort: number) {
           // touch building file to indicate that we are currently building delta image
           fs.closeSync(fs.openSync(buildingFile, 'w'));
 
+          const t0 = Date.now();
+          rec.status = 'building';
+          rec.error = undefined;
+          rec.startedAt = t0;
+          rec.finishedAt = undefined;
+          saveRecords();
+
           // Continue executing delta process in background
           const srcStream = await docker.pull(src, authOpts);
           const destStream = await docker.pull(dest, authOpts);
@@ -189,6 +309,8 @@ async function createHttpServer(listenPort: number) {
             waitForStream(srcStream),
             waitForStream(destStream),
           ]);
+          const t1 = Date.now();
+          rec.pullMs = t1 - t0;
 
           // Create delta image
           const deltaStream = await dt.createDelta(docker, {
@@ -197,10 +319,14 @@ async function createHttpServer(listenPort: number) {
             t: delta,
           } as dt.CreateDeltaOptions);
           await waitForStream(deltaStream);
+          const t2 = Date.now();
+          rec.diffMs = t2 - t1;
 
           // Push delta image
           const pushStream = await docker.getImage(delta).push(authOpts);
           await waitForStream(pushStream);
+          const t3 = Date.now();
+          rec.pushMs = t3 - t2;
 
           // Remove delta image to free up storage
           await docker.getImage(delta).remove(authOpts);
@@ -209,6 +335,15 @@ async function createHttpServer(listenPort: number) {
 
           // Remove building file
           if (fs.existsSync(buildingFile)) fs.rmSync(buildingFile);
+
+          // Sizes as stored in the registry (compressed)
+          rec.srcBytes = await manifestBytes(src);
+          rec.destBytes = await manifestBytes(dest);
+          rec.deltaBytes = await manifestBytes(delta);
+          rec.finishedAt = Date.now();
+          rec.buildMs = rec.finishedAt - t0;
+          rec.status = 'ready';
+          saveRecords();
 
           // If we are waiting, and we got to this point, delta image was built successfully
           if (wait) success();
@@ -223,6 +358,12 @@ async function createHttpServer(listenPort: number) {
       }
     } catch (err) {
       log(`V3 delta error: ${err.message}`);
+      if (rec && rec.status === 'building') {
+        rec.status = 'failed';
+        rec.error = String(err.message);
+        rec.finishedAt = Date.now();
+        saveRecords();
+      }
       if (!res.headersSent) {
         res.sendStatus(400);
       } else {
@@ -344,6 +485,23 @@ async function createHttpServer(listenPort: number) {
       log(`V2 delta download error: ${err.message}}`);
       res.sendStatus(400);
     }
+  });
+
+  // Build records for the Vector UI. Vector authenticates the user, then calls this with a key derived
+  // from the stack's JSON web token secret (HMAC-SHA256 of "delta-records"); devices do not have it.
+  app.get('/api/records', (req, res) => {
+    const expected = process.env.RECORDS_KEY;
+    if (!expected) {
+      res.sendStatus(503);
+      return;
+    }
+    const given = Buffer.from(String(req.headers['x-delta-records-key'] || ''));
+    const want = Buffer.from(expected);
+    if (given.length !== want.length || !crypto.timingSafeEqual(given as any, want as any)) {
+      res.sendStatus(401);
+      return;
+    }
+    res.json({ records: records.slice().reverse() });
   });
 
   app.listen(listenPort, () => {

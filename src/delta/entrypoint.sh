@@ -14,6 +14,11 @@ done
 
 TOKEN_AUTH_BUILDER_TOKEN="$(grep '^TOKEN_AUTH_BUILDER_TOKEN=' "${SECRETS}" | cut -d= -f2-)"
 export TOKEN_AUTH_BUILDER_TOKEN
+# Key the Vector server uses to read build records (derived, so no new secret to manage).
+JWT_SECRET="$(grep '^JSON_WEB_TOKEN_SECRET=' "${SECRETS}" | cut -d= -f2-)"
+RECORDS_KEY="$(printf 'delta-records' | openssl dgst -sha256 -hmac "${JWT_SECRET}" | awk '{print $NF}')"
+export RECORDS_KEY
+unset JWT_SECRET
 export BALENA_TLD="${TLD}"
 export REGISTRY_HOST="registry2.${TLD}"
 export DOCKER_HOST="unix:///var/run/docker.sock"

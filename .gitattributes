@@ -1,0 +1,2 @@
+*.sh text eol=lf
+src/delta/** text eol=lf

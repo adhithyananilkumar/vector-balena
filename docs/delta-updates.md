@@ -30,5 +30,6 @@ balena env set BALENA_SUPERVISOR_DELTA_VERSION 3 --fleet <fleet>
 ## Build records
 The server keeps a record of every delta it builds (`delta-data` volume, `/data/records.json`): the
 two releases, status, pull/diff/push times, compressed sizes and the devices that asked. The Vector UI
-shows them under Provision > Delta builds. Vector reads them from `127.0.0.1:3003` (or
-`VECTOR_DELTA_URL`) with a key derived from the stack's JSON web token secret; devices cannot read them.
+shows them under Provision > Delta builds. The [Vector server](vector-server.md) reads them from `VECTOR_DELTA_URL`
+(`http://delta:80` inside the stack, or `http://127.0.0.1:3003` from the host) with a key derived from the stack's JSON web
+token secret; devices cannot read them.

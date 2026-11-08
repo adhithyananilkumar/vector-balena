@@ -1,0 +1,45 @@
+{
+  "name": "vector-server",
+  "version": "0.9.4",
+  "private": true,
+  "description": "Vector API server: admin database access, image maker, built-in remote access, OS sync and delta records for the Vector UI",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/index.ts",
+    "start": "node dist/index.js",
+    "build": "ncc build src/index.ts -o dist -m",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/*.test.ts src/*/*.test.ts test/*.test.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.913.0",
+    "balena-image-fs": "^7.6.23",
+    "base32-encode": "^2.0.0",
+    "bcrypt-ts": "^7.1.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "express-slow-down": "^3.0.0",
+    "file-disk": "^8.0.1",
+    "jose": "^6.1.0",
+    "micro-key-producer": "^0.8.2",
+    "proxy-addr": "^2.0.7",
+    "semver": "^7.7.3",
+    "ssh2": "^1.17.0",
+    "ws": "^8.22.0",
+    "yauzl": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.23",
+    "@types/node": "^24.10.0",
+    "@types/proxy-addr": "^2.0.3",
+    "@types/ssh2": "^1.15.6",
+    "@types/ws": "^8.18.1",
+    "@types/yauzl": "^3.4.0",
+    "@vercel/ncc": "^0.38.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

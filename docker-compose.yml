@@ -17,6 +17,7 @@ volumes:
   redis-data: {}
   resin-data: {}
   s3-data: {}
+  vector-data: {}
 
 x-default-healthcheck: &default-healthcheck
   test: /usr/src/app/docker-hc
@@ -394,6 +395,38 @@ services:
       retries: 5
     labels:
       io.balena.features.sysfs: 1
+
+  # Vector server: API for the Vector UI (admin DB access, image maker, remote access, OS sync, delta records).
+  # The UI itself is a static site hosted elsewhere (see docs/vector-server.md).
+  vector-server:
+    <<: *base-service
+    build: src/vector-server
+    depends_on:
+      - postgrest
+      - delta
+    ports:
+      - "127.0.0.1:${VECTOR_SERVER_PORT:-3001}:3001"
+    volumes:
+      - certs-data:/certs:ro
+      - resin-data:/balena:ro
+      - vector-data:/usr/src/app/data
+    environment:
+      NODE_ENV: production
+      OPEN_BALENA_API_URL: https://api.${DNS_TLD:-protofleet.local}
+      OPEN_BALENA_API_VERSION: v52.2.3
+      OPEN_BALENA_POSTGREST_URL: http://postgrest:8000
+      OPEN_BALENA_S3_URL: https://s3.${DNS_TLD:-protofleet.local}
+      OPEN_BALENA_S3_REGISTRY_BUCKET: registry-data
+      OPEN_BALENA_S3_REGION: us-east-1
+      OPEN_BALENA_OS_METADATA_BUCKET: balena-os-metadata
+      OPEN_BALENA_TUNNEL_URL: http://vpn:3128
+      VECTOR_DELTA_URL: http://delta:80
+      # browser origins of the hosted UI that may call this server (comma separated)
+      VECTOR_ALLOWED_ORIGINS: ${VECTOR_ALLOWED_ORIGINS:-http://localhost:3000}
+      VECTOR_PUBLIC_URL: ${VECTOR_PUBLIC_URL:-http://localhost:3001}
+      # demo default: learn device SSH host keys on first use. Set false and pin keys for production.
+      OPEN_BALENA_SSH_TRUST_ON_FIRST_USE: ${VECTOR_SSH_TRUST_ON_FIRST_USE:-true}
+      OPEN_BALENA_BOOTSTRAP_USER_ID: ${OPEN_BALENA_BOOTSTRAP_USER_ID:-}
 
   # https://github.com/ob-community/open-balena-postgrest
   # admin-UI data access; JWT secret is read from the shared secrets volume at start

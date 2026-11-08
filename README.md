@@ -52,6 +52,17 @@ To learn more about openBalena, visit [balena.io/open][open-balena-website].
 - **Built-in VPN**: Access your devices regardless of their network environment
 
 
+## Vector: server and UI
+
+This repository also contains the **Vector server** ([`src/vector-server`](src/vector-server)), the API behind the
+Vector web interface, and an optional **delta update server** ([`src/delta`](src/delta)). Both run as services in
+`docker-compose.yml`.
+
+- The web interface is a separate, static project: [vector-balena-ui](https://github.com/adhithyananilkumar/vector-balena-ui).
+  Host it on Vercel or any static host and point it at the Vector server.
+- Start the server with `docker compose up -d vector-server`; details in [docs/vector-server.md](docs/vector-server.md).
+- All documentation is indexed in [docs/README.md](docs/README.md).
+
 ## Getting Started
 
 Our [Getting Started guide][getting-started] is the most direct path to getting

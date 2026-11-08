@@ -1,0 +1,28 @@
+# Virtual-device end-to-end test (does not change the normal stack).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml build sut dut
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d sut dut
+#   docker compose logs -f sut
+#
+# `sut` logs in with the admin credentials from the shared secrets volume (they are never passed on the
+# command line), creates a test fleet, downloads a balenaOS image, registers a virtual device, deploys a
+# release, then waits for `dut` (a QEMU virtual machine) to come online running that release.
+services:
+  # NOTE: do not cap the api / vpn memory here. A 1.5 GB cap was tried and the kernel kept killing the api's
+  # worker processes ("Memory cgroup out of memory"), which stalled the whole test. They need ~2.6 GB and
+  # ~1.5 GB, so the Docker VM needs roughly 10 GB for the full stack plus the virtual device.
+
+  sut:
+    environment:
+      # the harness exits immediately while this is "true" (normal production mode)
+      PRODUCTION_MODE: "false"
+
+  dut:
+    environment:
+      PRODUCTION_MODE: "false"
+      # smaller than the upstream default (3072M / 4 CPUs) so the rest of the stack keeps its memory
+      MEMORY: 1536M
+      CPU: 2
+    devices:
+      # hardware acceleration: without this QEMU falls back to very slow software emulation
+      - /dev/kvm

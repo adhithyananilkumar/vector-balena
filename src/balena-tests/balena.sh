@@ -181,6 +181,12 @@ function configure_virtual_device() {
           --appUpdatePollInterval 10 \
           --dev \
           --output /balena/config.json
+
+        # balenaOS adds 8.8.8.8 as a fallback resolver. Public DNS answers NXDOMAIN for the stack's private
+        # names, and dnsmasq takes the first answer, so the device intermittently cannot find the API.
+        # 10.0.2.3 is QEMU's own resolver, which forwards to Docker DNS (it knows api.<tld>, registry2.<tld>...).
+        jq '.dnsServers = "10.0.2.3"' /balena/config.json >/tmp/config.dns.json \
+          && mv /tmp/config.dns.json /balena/config.json
     fi
     cat </balena/config.json | jq -re
 

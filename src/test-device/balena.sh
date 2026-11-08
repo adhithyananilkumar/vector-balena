@@ -38,7 +38,7 @@ exec /usr/bin/qemu-system-x86_64 \
   -drive file="${tmpimg}",media=disk,cache=none,format=raw,if=none,id=disk \
   -m "${MEMORY}" \
   -machine type=q35 \
-  -netdev "user,id=n1,dns=127.0.0.1,guestfwd=tcp:10.0.2.100:80-cmd:netcat haproxy 80,guestfwd=tcp:10.0.2.100:443-cmd:netcat haproxy 443" \
+  -netdev "user,id=n1,guestfwd=tcp:10.0.2.100:80-cmd:netcat haproxy 80,guestfwd=tcp:10.0.2.100:443-cmd:netcat haproxy 443" \
   -nodefaults \
   -nographic \
   -serial chardev:serial0 \

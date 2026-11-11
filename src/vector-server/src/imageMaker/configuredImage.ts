@@ -145,6 +145,102 @@ export interface GeneratedConfig {
   device?: { id: number; uuid: string };
 }
 
+interface RegisteredDevice {
+  id: number;
+  uuid: string;
+  api_key: string;
+}
+
+/** Registers one device in a fleet with the fleet's provisioning key. */
+const registerWithKey = async (
+  apiUrl: string,
+  provisioningKey: string,
+  appId: number,
+  deviceType: string,
+  fetchImpl: typeof fetch,
+): Promise<RegisteredDevice> => {
+  const uuid = randomBytes(16).toString('hex');
+  let response: Response;
+  try {
+    response = await fetchImpl(`${apiUrl.replace(/\/+$/, '')}/device/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${provisioningKey}` },
+      body: JSON.stringify({ application: appId, device_type: deviceType, uuid }),
+    });
+  } catch {
+    throw new ConfigGenerationError('The balena API could not be reached.');
+  }
+  if (!response.ok) {
+    throw new ConfigGenerationError(`The device could not be registered (HTTP ${response.status}).`);
+  }
+  const registered = (await response.json()) as { id?: unknown; uuid?: unknown; api_key?: unknown };
+  if (typeof registered.id !== 'number' || typeof registered.uuid !== 'string' || typeof registered.api_key !== 'string') {
+    throw new ConfigGenerationError('The API returned an unexpected registration.');
+  }
+  return { id: registered.id, uuid: registered.uuid, api_key: registered.api_key };
+};
+
+export interface AddDeviceRequest {
+  appId: number;
+  deviceType: string;
+  version: string;
+  name?: string;
+}
+
+/** Validates the answers of the "add device" step. */
+export const parseAddDeviceRequest = (body: unknown): AddDeviceRequest => {
+  const input = (body ?? {}) as Record<string, unknown>;
+  const appId = Number(input.appId);
+  if (!Number.isSafeInteger(appId) || appId <= 0) throw new BaseImageValidationError('Choose a fleet.');
+  let name: string | undefined;
+  if (input.name != null && input.name !== '') {
+    if (typeof input.name !== 'string') throw new BaseImageValidationError('The device name is not valid.');
+    name = input.name.trim();
+    if (name.length < 1 || name.length > 64 || /[\u0000-\u001f\u007f]/.test(name)) {
+      throw new BaseImageValidationError('A device name is 1 to 64 characters, with no control characters.');
+    }
+  }
+  return { appId, deviceType: assertDeviceType(input.deviceType), version: assertVersion(input.version), name };
+};
+
+/**
+ * Adds one device to a fleet, and nothing else: no image, no configuration is handed out. The device shows in the
+ * fleet as offline until it boots with a config made for it. With a name, the device is renamed from the random one.
+ */
+export const addDevice = async (
+  apiUrl: string,
+  authorization: string,
+  request: AddDeviceRequest,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ id: number; uuid: string; name?: string }> => {
+  const config = await fetchFleetConfig(
+    apiUrl,
+    authorization,
+    { appId: request.appId, deviceType: request.deviceType, version: request.version, developmentMode: false, provisioning: 'device', network: 'ethernet' },
+    fetchImpl,
+  );
+  const provisioningKey = config.apiKey;
+  if (typeof provisioningKey !== 'string' || !provisioningKey) {
+    throw new ConfigGenerationError('The API did not return a provisioning key, so the device cannot be registered.');
+  }
+  const registered = await registerWithKey(apiUrl, provisioningKey, request.appId, request.deviceType, fetchImpl);
+  if (request.name) {
+    let renamed: Response | undefined;
+    try {
+      renamed = await fetchImpl(`${apiUrl.replace(/\/+$/, '')}/v7/device(${registered.id})`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', authorization },
+        body: JSON.stringify({ device_name: request.name }),
+      });
+    } catch {
+      renamed = undefined;
+    }
+    // the device exists either way: a failed rename is reported by leaving the name out of the answer
+    if (!renamed?.ok) return { id: registered.id, uuid: registered.uuid };
+  }
+  return { id: registered.id, uuid: registered.uuid, name: request.name };
+};
+
 /**
  * Fleet-wide config, or, for device provisioning, the same config after registering one device and swapping the
  * shared provisioning key for that device's own key (what `balena config generate --device` does).
@@ -163,24 +259,7 @@ export const generateConfig = async (
   if (typeof provisioningKey !== 'string' || !provisioningKey) {
     throw new ConfigGenerationError('The API did not return a provisioning key, so the device cannot be registered.');
   }
-  const uuid = randomBytes(16).toString('hex');
-  let response: Response;
-  try {
-    response = await fetchImpl(`${apiUrl.replace(/\/+$/, '')}/device/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${provisioningKey}` },
-      body: JSON.stringify({ application: request.appId, device_type: request.deviceType, uuid }),
-    });
-  } catch {
-    throw new ConfigGenerationError('The balena API could not be reached.');
-  }
-  if (!response.ok) {
-    throw new ConfigGenerationError(`The device could not be registered (HTTP ${response.status}).`);
-  }
-  const registered = (await response.json()) as { id?: unknown; uuid?: unknown; api_key?: unknown };
-  if (typeof registered.id !== 'number' || typeof registered.uuid !== 'string' || typeof registered.api_key !== 'string') {
-    throw new ConfigGenerationError('The API returned an unexpected registration.');
-  }
+  const registered = await registerWithKey(apiUrl, provisioningKey, request.appId, request.deviceType, fetchImpl);
   const { apiKey: _shared, ...rest } = config;
   return {
     config: {

@@ -72,6 +72,13 @@ The Add device page streams a balenaOS image through the server: it is unzipped 
 
 Events are `image-prepared`, `download-started`, `download-finished` and `download-failed`.
 
+The same service supports the local base-image flow used by the Add device wizard:
+
+- `POST /image-maker/devices` registers a named device (it shows as offline, "Awaiting first boot") before any download.
+- `POST /image-maker/os-downloads` prepares the unmodified balenaOS download for a device type and version. The browser saves it once in the user's own folder and reuses it. `POST /image-maker/boot-patch` returns only the changed boot-partition blocks plus the SHA-256 of the original head, so the browser builds a flash-ready image from its local base without downloading the OS again.
+- Download links accept `?from=N` to resume after a dropped connection. A resume inside the boot partition is refused (HTTP 409) and the client restarts that file. Responses are gzip-compressed when the client accepts it.
+- Audit events also include `base-image-prepared`, `boot-patch` and `device-added`.
+
 ### Public HTTPS address
 
 The stack's `haproxy` already terminates TLS for every openBalena host, using the wildcard certificate for

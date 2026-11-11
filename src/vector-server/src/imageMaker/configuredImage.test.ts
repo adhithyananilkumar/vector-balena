@@ -6,6 +6,8 @@ import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { after, before, describe, it } from 'node:test';
 import {
+  addDevice,
+  parseAddDeviceRequest,
   fetchFleetConfig,
   generateConfig,
   parseFleetConfigRequest,
@@ -190,5 +192,60 @@ describe('generateConfig for an already registered device', () => {
     assert.throws(() => parseFleetConfigRequest({ ...ok, deviceUuid: "x' or 1 eq 1 or uuid eq '" }), /valid device uuid/);
     assert.equal(parseFleetConfigRequest({ ...ok, provisioning: 'fleet' }).deviceUuid, undefined);
     assert.equal(parseFleetConfigRequest({ ...ok, deviceUuid: 'b'.repeat(62) }).deviceUuid, 'b'.repeat(62));
+  });
+});
+
+describe('adding a device as a separate step', () => {
+  const ok = { appId: 7, deviceType: 'raspberrypi4-64', version: '9.0.3+rev2' };
+
+  const api = (options: { registerStatus?: number; renameStatus?: number } = {}) => {
+    const calls: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input).replace('https://api.test', '');
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      if (url.endsWith('/download-config')) return new Response(JSON.stringify({ apiKey: 'shared-provisioning-key', apiEndpoint: 'https://api.test' }));
+      if (url.endsWith('/device/register')) {
+        return options.registerStatus
+          ? new Response('no', { status: options.registerStatus })
+          : new Response(JSON.stringify({ id: 9, uuid: 'c'.repeat(32), api_key: 'device-key' }));
+      }
+      if (url.startsWith('/v7/device(9)')) return new Response('{}', { status: options.renameStatus ?? 200 });
+      return new Response('unexpected', { status: 500 });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, calls };
+  };
+
+  it('registers one device and hands out no key or configuration', async () => {
+    const { fetchImpl, calls } = api();
+    const device = await addDevice('https://api.test', 'Bearer t', parseAddDeviceRequest(ok), fetchImpl);
+    assert.deepEqual(device, { id: 9, uuid: 'c'.repeat(32), name: undefined });
+    assert.equal(calls.filter((call) => call.includes('/device/register')).length, 1);
+    assert.ok(!JSON.stringify(device).includes('key'), 'no key leaves the server');
+  });
+
+  it('names the device, as the signed-in user, and reports the name', async () => {
+    const { fetchImpl, calls } = api();
+    const device = await addDevice('https://api.test', 'Bearer t', parseAddDeviceRequest({ ...ok, name: '  Lab Pi 1 ' }), fetchImpl);
+    assert.equal(device.name, 'Lab Pi 1');
+    assert.ok(calls.includes('PATCH /v7/device(9)'));
+  });
+
+  it('still reports the device when only the rename failed, without claiming a name', async () => {
+    const device = await addDevice('https://api.test', 'Bearer t', parseAddDeviceRequest({ ...ok, name: 'Lab Pi 1' }), api({ renameStatus: 500 }).fetchImpl);
+    assert.equal(device.uuid, 'c'.repeat(32));
+    assert.equal(device.name, undefined);
+  });
+
+  it('says so when the device cannot be registered', async () => {
+    await assert.rejects(addDevice('https://api.test', 'Bearer t', parseAddDeviceRequest(ok), api({ registerStatus: 403 }).fetchImpl), /could not be registered \(HTTP 403\)/);
+  });
+
+  it('validates the answers', () => {
+    assert.throws(() => parseAddDeviceRequest({ ...ok, appId: 'x' }), /Choose a fleet/);
+    assert.throws(() => parseAddDeviceRequest({ ...ok, version: '../x' }), /version/);
+    assert.throws(() => parseAddDeviceRequest({ ...ok, name: 'x'.repeat(65) }), /1 to 64 characters/);
+    assert.throws(() => parseAddDeviceRequest({ ...ok, name: 'a\nb' }), /control characters/);
+    assert.throws(() => parseAddDeviceRequest({ ...ok, name: 5 }), /not valid/);
+    assert.equal(parseAddDeviceRequest({ ...ok, name: '' }).name, undefined);
   });
 });

@@ -8,6 +8,7 @@ import {
   BaseImageValidationError,
   canDownloadOsImage,
   ConfigGenerationError,
+  addDevice,
   generateConfig,
   getImageTickets,
   getOsVersions,
@@ -16,6 +17,7 @@ import {
   openBootPatch,
   openConfiguredImage,
   osDownloadUrl,
+  parseAddDeviceRequest,
   parseFleetConfigRequest,
   StreamedImageError,
   type ImageTicket,
@@ -67,6 +69,24 @@ const apiUrl = (): string => {
   if (!url) throw new ConfigGenerationError('The balena API address is not configured.', 500);
   return url;
 };
+
+/**
+ * Adds one named device to a fleet: the explicit first step. It registers the device (offline until it boots) and
+ * hands out nothing; images and configs are then made for that device with the key created for it.
+ */
+router.post('/image-maker/devices', ...dosProtect, authorize, async (req, res) => {
+  try {
+    await requireImageManager(req.headers.authorization!, (res.locals as AuthorizedLocals).auth);
+    const request = parseAddDeviceRequest(req.body);
+    await requireDownloadable(request.deviceType, request.version);
+    const device = await addDevice(apiUrl(), req.headers.authorization!, request);
+    const auth = (res.locals as AuthorizedLocals).auth as { username?: string; id?: number | string };
+    audit({ event: 'device-added', by: String(auth.username ?? auth.id ?? 'unknown'), deviceType: request.deviceType, deviceUuid: device.uuid, named: Boolean(device.name), from: req.ip });
+    res.status(201).json({ device });
+  } catch (error) {
+    fail(res, error, 'Unable to add the device.');
+  }
+});
 
 /** Just the config.json, for devices that are already flashed (write it to the boot partition). */
 router.post('/image-maker/config', ...dosProtect, authorize, async (req, res) => {

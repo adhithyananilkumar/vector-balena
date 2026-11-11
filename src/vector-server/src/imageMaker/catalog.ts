@@ -1,4 +1,4 @@
-import { assertDeviceType } from './baseImages';
+import { assertDeviceType } from './validation';
 
 export interface CatalogOptions {
   /** Where balenaOS releases are listed. Defaults to balena's public API. */

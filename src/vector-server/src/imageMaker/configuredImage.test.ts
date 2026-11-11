@@ -8,7 +8,6 @@ import { after, before, describe, it } from 'node:test';
 import {
   fetchFleetConfig,
   generateConfig,
-  ImageJobs,
   parseFleetConfigRequest,
   readConfigFromImage,
   writeConfigToImage,
@@ -127,31 +126,6 @@ describe('config.json in a disk image', () => {
   });
 });
 
-describe('ImageJobs', () => {
-  it('copies the base image, configures only the copy, and signs short-lived links', async () => {
-    let clock = 1_000_000;
-    const jobs = new ImageJobs({ dir: path.join(dir, 'jobs'), secret: 'secret', now: () => clock });
-    const before = await readConfigFromImage(baseImage);
-    const job = jobs.create(baseImage, { marker: 'fleet-a' }, 'generic-amd64', '9.0.4+rev1');
-    assert.equal(job.state, 'building');
-    assert.throws(() => jobs.create(baseImage, {}, 'generic-amd64', '9.0.4+rev1'), /Another image/);
-    await jobs.idle();
-    assert.equal(job.state, 'ready', job.error);
-    assert.deepEqual(await readConfigFromImage(job.path), { marker: 'fleet-a' });
-    assert.deepEqual(await readConfigFromImage(baseImage), before, 'the shared base image must stay untouched');
-
-    const { expires, signature } = jobs.sign(job.id);
-    assert.ok(jobs.verify(job.id, expires, signature));
-    assert.ok(!jobs.verify('0'.repeat(32), expires, signature), 'link is bound to its image');
-    assert.ok(!jobs.verify(job.id, expires, signature.replace(/.$/, signature.endsWith('0') ? '1' : '0')));
-    assert.ok(!jobs.verify(job.id, expires + 1, signature));
-    clock += 11 * 60 * 1000;
-    assert.ok(!jobs.verify(job.id, expires, signature), 'link expires');
-    clock += 30 * 60 * 1000;
-    assert.equal(jobs.get(job.id), undefined, 'finished images are discarded after the TTL');
-  });
-});
-
 describe('dnsServers', () => {
   const ok = { appId: 7, deviceType: 'generic-amd64', version: '9.0.4+rev1' };
 
@@ -166,25 +140,5 @@ describe('dnsServers', () => {
     const fetchImpl = (async () => new Response(JSON.stringify({ apiEndpoint: 'x' }), { status: 200 })) as unknown as typeof fetch;
     const { config } = await generateConfig('https://api.test', 'Bearer t', parseFleetConfigRequest({ ...ok, dnsServers: '10.0.2.2,1.1.1.1' }), fetchImpl);
     assert.equal(config.dnsServers, '10.0.2.2 1.1.1.1');
-  });
-});
-
-describe('ImageJobs restart', () => {
-  it('restores a finished image after a restart and discards interrupted work', async () => {
-    const jobsDir = path.join(dir, 'restart-jobs');
-    const first = new ImageJobs({ dir: jobsDir, secret: 'secret' });
-    const job = first.create(baseImage, { marker: 'kept' }, 'generic-amd64', '9.0.4+rev1', 'abc');
-    await first.idle();
-    assert.equal(job.state, 'ready', job.error);
-    await writeFile(path.join(jobsDir, `${'f'.repeat(32)}.img`), 'half written');
-
-    const second = new ImageJobs({ dir: jobsDir, secret: 'secret' });
-    second.restore();
-    const restored = second.get(job.id);
-    assert.equal(restored?.state, 'ready');
-    assert.equal(restored?.deviceUuid, 'abc');
-    assert.deepEqual(await readConfigFromImage(restored!.path), { marker: 'kept' });
-    assert.equal(second.get('f'.repeat(32)), undefined);
-    await assert.rejects(readFile(path.join(jobsDir, `${'f'.repeat(32)}.img`)), 'interrupted copies are deleted');
   });
 });

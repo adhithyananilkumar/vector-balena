@@ -1,50 +1,68 @@
-import path from 'node:path';
-import { BaseImageStore } from './baseImages';
 import { listOsVersions } from './catalog';
-import { ImageJobs } from './configuredImage';
+import { ImageTickets } from './imageTickets';
+import { isDownloadable } from './streamedImage';
+import { assertDeviceType } from './validation';
 
-export * from './baseImages';
+export * from './validation';
 export { listOsVersions, clearCatalogCache } from './catalog';
 export * from './configuredImage';
+export * from './imageTickets';
+export * from './streamedImage';
 
 /**
  * Settings (all optional):
- * - VECTOR_BASE_IMAGES_DIR  where downloaded base images are kept (default ./data/base-images)
  * - VECTOR_OS_CATALOG_API_URL  where balenaOS versions and image downloads come from (default balena's public API)
+ * - VECTOR_IMAGE_TMP_DIR  scratch folder for the boot partition while an image streams (default: system temp)
+ * - VECTOR_IMAGE_MAX_STREAMS  how many images may stream at once (default 2)
+ *
+ * Images themselves are never stored on this server: they stream from balena's download service to the browser.
  */
 export const imageMakerSettings = () => ({
-  baseImagesDir: path.resolve(process.env.VECTOR_BASE_IMAGES_DIR || 'data/base-images'),
-  workDir: path.resolve(process.env.VECTOR_IMAGE_WORK_DIR || 'data/image-jobs'),
   osCatalogApiUrl: (process.env.VECTOR_OS_CATALOG_API_URL || 'https://api.balena-cloud.com').replace(/\/+$/, ''),
+  tmpDir: process.env.VECTOR_IMAGE_TMP_DIR || undefined,
+  maxStreams: Math.max(1, Number(process.env.VECTOR_IMAGE_MAX_STREAMS) || 2),
 });
 
-let store: BaseImageStore | undefined;
+/** The balenaOS download for a device type and version ("+" must be percent-encoded). */
+export const osDownloadUrl = (deviceType: string, version: string): string =>
+  `${imageMakerSettings().osCatalogApiUrl}/download?deviceType=${encodeURIComponent(deviceType)}` +
+  `&version=${encodeURIComponent(version)}&fileType=.zip`;
 
-/** The shared library of downloaded base images. */
-export const getBaseImageStore = (): BaseImageStore => {
-  if (!store) {
-    const settings = imageMakerSettings();
-    store = new BaseImageStore({
-      dir: settings.baseImagesDir,
-      // same download endpoint the repo's end-to-end test uses; "+" must be percent-encoded
-      downloadUrl: (deviceType, version) =>
-        `${settings.osCatalogApiUrl}/download?deviceType=${encodeURIComponent(deviceType)}` +
-        `&version=${encodeURIComponent(version)}&fileType=.zip`,
-    });
-  }
-  return store;
+let tickets: ImageTickets | undefined;
+
+/** Permissions to download configured images (in memory only). */
+export const getImageTickets = (): ImageTickets => {
+  if (!tickets) tickets = new ImageTickets({ secret: process.env.OPEN_BALENA_JWT_SECRET ?? '' });
+  return tickets;
 };
 
-let jobs: ImageJobs | undefined;
+const downloadable = new Map<string, { at: number; ok: boolean }>();
+const DOWNLOADABLE_TTL_MS = 10 * 60 * 1000;
 
-/** Configured images being prepared or waiting to be downloaded. */
-export const getImageJobs = (): ImageJobs => {
-  if (!jobs) {
-    jobs = new ImageJobs({ dir: imageMakerSettings().workDir, secret: process.env.OPEN_BALENA_JWT_SECRET ?? '' });
-    jobs.restore();
-  }
-  return jobs;
+/** Cached check that balena offers this image (see isDownloadable). */
+export const canDownloadOsImage = async (deviceType: string, version: string, fetchImpl?: typeof fetch): Promise<boolean> => {
+  const key = `${deviceType}|${version}`;
+  const hit = downloadable.get(key);
+  if (hit && Date.now() - hit.at < DOWNLOADABLE_TTL_MS) return hit.ok;
+  const ok = await isDownloadable(osDownloadUrl(deviceType, version), fetchImpl);
+  downloadable.set(key, { at: Date.now(), ok });
+  return ok;
 };
 
-export const getOsVersions =(deviceType: unknown): Promise<string[]> =>
-  listOsVersions(deviceType, { apiUrl: imageMakerSettings().osCatalogApiUrl });
+export const clearDownloadableCache = (): void => downloadable.clear();
+
+/** Versions of a device type that can actually be downloaded, newest first. */
+export const getOsVersions = async (deviceType: unknown, fetchImpl?: typeof fetch): Promise<string[]> => {
+  const slug = assertDeviceType(deviceType);
+  const listed = await listOsVersions(slug, { apiUrl: imageMakerSettings().osCatalogApiUrl, fetchImpl });
+  const keep = new Set<string>();
+  let next = 0;
+  const worker = async () => {
+    while (next < listed.length) {
+      const version = listed[next++];
+      if (await canDownloadOsImage(slug, version, fetchImpl)) keep.add(version);
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  return listed.filter((version) => keep.has(version));
+};

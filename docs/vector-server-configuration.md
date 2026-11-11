@@ -203,9 +203,9 @@ unconfigured rather than advertising a gateway whose requests would all fail aut
 
 ### Image maker, deltas and the data directory
 
-- `VECTOR_BASE_IMAGES_DIR` Where downloaded balenaOS base images are kept. Defaults to `./data/base-images`
-  (several GB per device type).
-- `VECTOR_IMAGE_WORK_DIR` Where prepared images wait for download. Defaults to `./data/image-jobs`.
+- `VECTOR_IMAGE_MAX_STREAMS` How many OS images may stream to browsers at once. Defaults to `2`.
+- `VECTOR_IMAGE_TMP_DIR` Scratch folder for the boot partition (tens of megabytes) while an image streams; it is removed
+  before the rest of the image is sent. Defaults to the system temp folder. OS images themselves are never stored.
 - `VECTOR_OS_CATALOG_API_URL` Where balenaOS versions and downloads come from. Defaults to `https://api.balena-cloud.com`.
 - `VECTOR_DELTA_URL` Address of the delta server for the Delta builds page. Defaults to `https://delta.<api host>`;
   the compose stack sets `http://delta:80`. See [delta-updates.md](delta-updates.md).

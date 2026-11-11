@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { interact } from 'balena-image-fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -12,6 +13,7 @@ import {
   generateConfig,
   parseFleetConfigRequest,
   readConfigFromImage,
+  wifiConnectionFile,
   writeConfigToImage,
 } from './configuredImage';
 
@@ -125,6 +127,32 @@ describe('config.json in a disk image', () => {
     const config = { applicationId: 7, apiEndpoint: 'https://api.example.test', balenaRootCA: 'x'.repeat(6000) };
     await writeConfigToImage(baseImage, config);
     assert.deepEqual(await readConfigFromImage(baseImage), config);
+  });
+});
+
+describe('Wi-Fi in a disk image', () => {
+  it('builds the NetworkManager connection balenaOS reads', () => {
+    const file = wifiConnectionFile({ wifiSsid: 'Home Net', wifiKey: 'pa\\ss' }) ?? '';
+    assert.match(file, /^\[connection\]\nid=resin-wifi-01\ntype=wifi\n/);
+    assert.match(file, /\nssid=Home Net\n/);
+    assert.match(file, /\[wifi-security\]\nauth-alg=open\nkey-mgmt=wpa-psk\npsk=pa\\\\ss\n/);
+    assert.match(file, /\[ipv4\]\nmethod=auto\n/);
+  });
+
+  it('leaves out the security section for an open network and writes nothing without a network', () => {
+    assert.doesNotMatch(wifiConnectionFile({ wifiSsid: 'open' }) ?? '', /wifi-security/);
+    assert.equal(wifiConnectionFile({ apiEndpoint: 'x' }), undefined);
+  });
+
+  it('writes the connection into the boot partition next to config.json without changing the image size', async () => {
+    const before = (await stat(baseImage)).size;
+    await writeConfigToImage(baseImage, { applicationId: 7, wifiSsid: 'Lab', wifiKey: 'secret123' });
+    assert.equal((await stat(baseImage)).size, before);
+    const stored = await interact(baseImage, 1, (fs) =>
+      new Promise<string>((resolve, reject) => fs.readFile('/system-connections/resin-wifi-01', { encoding: 'utf8', flag: 'r' }, (e, c) => (e ? reject(e) : resolve(c)))),
+    );
+    assert.match(stored, /ssid=Lab\n/);
+    assert.match(stored, /psk=secret123\n/);
   });
 });
 

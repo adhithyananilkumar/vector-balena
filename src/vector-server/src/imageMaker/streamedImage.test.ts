@@ -7,6 +7,7 @@ import { Readable } from 'node:stream';
 import { crc32, deflateRawSync, gunzipSync } from 'node:zlib';
 import { after, before, describe, it } from 'node:test';
 import { writeFile } from 'node:fs/promises';
+import { interact } from 'balena-image-fs';
 import { readConfigFromImage } from './configuredImage';
 import {
   firstPartitionEnd,
@@ -462,6 +463,23 @@ describe('resuming, base images and boot patches', () => {
     assert.ok(total > 0 && total < 256 * 1024, `only a few blocks change (${total} bytes)`);
     assert.ok(patch.patches.every((part) => part.offset + part.data.length <= bootEnd), 'nothing outside the boot partition changes');
     assert.equal(patch.fileName, 'balena.img');
+  });
+
+  it('a boot patch for a Wi-Fi device also carries the connection file balenaOS joins the network from', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 });
+    const wifiConfig = { ...config, wifiSsid: 'Lab Net', wifiKey: 'correct horse' };
+    const zip = makeZip('balena.img', disk);
+    const patch = await openBootPatch('https://download.test/x.zip', wifiConfig, { fetchImpl: balena(zip), tmpDir: tmp });
+    const patched = Buffer.from(disk);
+    for (const part of patch.patches) part.data.copy(patched, part.offset);
+    const out = path.join(tmp, 'wifi-patched.img');
+    await writeFile(out, patched);
+    const stored = await interact(out, 1, (fs) =>
+      new Promise<string>((resolve, reject) => fs.readFile('/system-connections/resin-wifi-01', { encoding: 'utf8', flag: 'r' }, (e, c) => (e ? reject(e) : resolve(c)))),
+    );
+    assert.match(stored, /ssid=Lab Net\n/);
+    assert.match(stored, /psk=correct horse\n/);
+    assert.deepEqual(await readConfigFromImage(out), wifiConfig);
   });
 
   it('a boot patch reads only the start of the download, not the whole image', async () => {

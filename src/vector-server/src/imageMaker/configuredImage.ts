@@ -273,11 +273,35 @@ export const generateConfig = async (
   };
 };
 
-/** Writes config.json into the boot partition (partition 1) of a balenaOS disk image, in place. */
+const keyfileValue = (value: string): string => value.replace(/\\/g, '\\\\');
+
+/**
+ * The NetworkManager connection balenaOS reads from the boot partition (`system-connections/resin-wifi-01`).
+ * balenaOS ignores `wifiSsid` and `wifiKey` inside config.json: it is this file that makes the device join the
+ * network, as `balena os configure` writes it. Returns undefined when the config has no Wi-Fi network.
+ */
+export const wifiConnectionFile = (config: Record<string, unknown>): string | undefined => {
+  const ssid = typeof config.wifiSsid === 'string' ? config.wifiSsid : '';
+  if (!ssid) return undefined;
+  const key = typeof config.wifiKey === 'string' ? config.wifiKey : '';
+  const lines = ['[connection]', 'id=resin-wifi-01', 'type=wifi', '', '[wifi]', 'hidden=true', 'mode=infrastructure', `ssid=${keyfileValue(ssid)}`, ''];
+  if (key) lines.push('[wifi-security]', 'auth-alg=open', 'key-mgmt=wpa-psk', `psk=${keyfileValue(key)}`, '');
+  lines.push('[ipv4]', 'method=auto', '', '[ipv6]', 'addr-gen-mode=stable-privacy', 'method=auto', '');
+  return lines.join('\n');
+};
+
+/** Writes config.json (and the Wi-Fi connection, when the config names a network) into the boot partition. */
 export const writeConfigToImage = async (imagePath: string, config: Record<string, unknown>): Promise<void> => {
   const data = Buffer.from(JSON.stringify(config, null, 2));
+  const wifi = wifiConnectionFile(config);
   await interact(imagePath, 1, async (fs) => {
     await new Promise<void>((resolve, reject) => fs.writeFile('/config.json', data, { flag: 'w' }, (e) => (e ? reject(e) : resolve())));
+    if (wifi) {
+      await new Promise<void>((resolve) => fs.mkdir('/system-connections', () => resolve())); // exists on balenaOS; harmless when it does
+      await new Promise<void>((resolve, reject) =>
+        fs.writeFile('/system-connections/resin-wifi-01', Buffer.from(wifi), { flag: 'w' }, (e) => (e ? reject(e) : resolve())),
+      );
+    }
   });
 };
 

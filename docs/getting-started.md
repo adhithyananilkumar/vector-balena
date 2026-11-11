@@ -35,9 +35,17 @@ ocsp.mydomain.com
 registry2.mydomain.com
 s3.mydomain.com
 tunnel.mydomain.com
+vector.mydomain.com
 ```
 
-Alternatively you may consider adding a single wildcard DNS record `*.mydomain.com`.
+`vector.mydomain.com` is the HTTPS address of the Vector server for the hosted Vector UI (see
+[vector-server.md](vector-server.md#public-https-address)).
+
+Alternatively you may consider adding a single wildcard DNS record `*.mydomain.com`. If you
+host the domain on Cloudflare, create the records as **DNS only** (grey cloud): devices reach
+the server over a VPN and a tunnel on port 443 that Cloudflare's proxy does not carry. To keep
+the rest of the domain free, you can use a sub-domain as the server's domain (for example
+`DNS_TLD=fleet.mydomain.com` with records for `fleet` and `*.fleet`).
 
 Check with your Internet domain name registrar for instructions on how to obtain a domain
 name and configure records.
@@ -69,12 +77,17 @@ name and configure records.
    sudo su balena
    ```
 
-5. Clone the openBalena repository and change directory:
+5. Clone this repository (Vector's build of openBalena, which includes the Vector server and the route to
+   it) and the PostgREST service it builds from. The composition builds `../open-balena-postgrest`, so both folders
+   must sit next to each other:
 
    ```bash
-   git clone https://github.com/balena-io/open-balena.git ~/open-balena
-   cd ~/open-balena
+   git clone https://github.com/adhithyananilkumar/vector-balena.git ~/vector-balena
+   git clone https://github.com/ob-community/open-balena-postgrest.git ~/open-balena-postgrest
+   cd ~/vector-balena
    ```
+
+   To run upstream openBalena without Vector, clone `https://github.com/balena-io/open-balena.git` instead.
 
 6. Start the server on your domain name:
 
@@ -83,7 +96,41 @@ name and configure records.
    make up
    ```
 
-   Note down `SUPERUSER_EMAIL` and `SUPERUSER_PASSWORD` values to be used later.
+   Note down `SUPERUSER_EMAIL` and `SUPERUSER_PASSWORD` values to be used later. If you missed the
+   password: `docker compose exec api cat config/env | grep SUPERUSER_PASSWORD`.
+
+   For the hosted Vector UI also set these before `make up` (see [vector-server.md](vector-server.md)):
+
+   ```bash
+   export VECTOR_ALLOWED_ORIGINS=https://vector.mydomain.com    # where the UI is hosted
+   export VECTOR_PUBLIC_URL=https://vector.${DNS_TLD}
+   ```
+
+   `make config` rewrites `.env` from the Makefile's own variables only, so settings written into `.env` by hand
+   (such as `VECTOR_*`) are dropped by `make up`. Keep them in the shell environment, or start the stack with
+   `docker compose up -d` directly, which reads `.env` as it is.
+
+   > [!NOTE]
+   > **ARM servers (aarch64, for example Oracle Ampere):** `make up` and `docker compose up -d` also build the `sut`
+   > and `dut` test services, and `sut` downloads a balena CLI build that does not exist for ARM, so the build fails.
+   > Those services are only for the test suite. Start the rest by name:
+   >
+   > ```bash
+   > docker compose up --build -d balena-ca cert-manager db docker redis s3 api postgrest tag-sidecar \
+   >   haproxy registry delta vector-server haproxy-sidecar vpn
+   > ```
+   >
+   > First start takes several minutes: images build, then the wildcard certificate is issued, then DH parameters are
+   > generated (slow on small ARM CPUs). `haproxy` restarts until the certificate files exist; that is expected.
+
+   After the first start, once `api` is healthy:
+
+   1. `docker compose restart postgrest`. It may have started before the API created the tables (its log then says
+      `Schema cache loaded 0 Relations`), and the Vector UI shows `502` on `/admin-db/...` until it is restarted.
+   2. Make your first administrator: set `OPEN_BALENA_BOOTSTRAP_USER_ID` to the superuser's numeric id (usually `2`;
+      `docker compose exec db psql -U docker -d resin -Atc 'select id,email from "user"'`) and run
+      `docker compose up -d vector-server`. Remove the setting once you have created a second global administrator,
+      see [access-controls.md](access-controls.md).
 
 7. Tail the logs of the containers with:
 
@@ -172,12 +219,19 @@ for the following DNS providers is currently implemented:
 
 #### Cloudflare
 
-Obtain a Cloudflare API token with write access to your openBalena domain name records:
+Obtain a Cloudflare API token with write access to your openBalena domain name records. A token
+limited to the one zone with **Zone: DNS: Edit** and **Zone: Zone: Read** is enough (Cloudflare
+dashboard: My Profile > API Tokens > Create Token > "Edit zone DNS", then add Zone Read):
 
 ```bash
 export ACME_EMAIL=acme@mydomain.com
 export CLOUDFLARE_API_TOKEN={{token}}
 ```
+
+The server requests one wildcard certificate (`*.<DNS_TLD>`) from Let's Encrypt. If the domain has
+`CAA` records, they must allow `letsencrypt.org` in an `issuewild` record. Keep the token in the
+server's `.env` only, and note that cert-manager's logs contain the certificate's private key
+when it is installed, so do not share them.
 
 #### Gandi
 

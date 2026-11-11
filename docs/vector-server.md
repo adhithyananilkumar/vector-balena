@@ -50,12 +50,28 @@ Useful overrides (shell environment or the stack's `.env`):
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `VECTOR_SERVER_PORT` | `3001` | Host port, bound to `127.0.0.1` only. Put HTTPS in front of it for anything beyond localhost. |
-| `VECTOR_ALLOWED_ORIGINS` | `http://localhost:3000` | Browser origins of the hosted UI (comma separated). |
-| `VECTOR_PUBLIC_URL` | `http://localhost:3001` | Public address of this server. |
+| `VECTOR_SERVER_PORT` | `3001` | Host port, bound to `127.0.0.1` only. For anything beyond localhost use the HTTPS address below instead of opening this port. |
+| `VECTOR_ALLOWED_ORIGINS` | `http://localhost:3000` | Browser origins of the hosted UI (comma separated), for example `https://vector.mydomain.com`. |
+| `VECTOR_PUBLIC_URL` | `http://localhost:3001` | Public address of this server, for example `https://vector.<DNS_TLD>`. |
 | `VECTOR_SSH_TRUST_ON_FIRST_USE` | `true` | Demo default. Set `false` and pin host keys in production. |
 
 Base images, prepared images and learned SSH host keys are stored in the `vector-data` volume.
+
+### Public HTTPS address
+
+The stack's `haproxy` already terminates TLS for every openBalena host, using the wildcard certificate for
+`*.<DNS_TLD>`. It also sends `vector.<DNS_TLD>` to this server (`src/haproxy/haproxy.cfg`, backend `vector-backend`), so
+once the DNS wildcard exists and the certificate is issued the server is reachable at `https://vector.<DNS_TLD>` with
+no extra proxy and no extra published port. Check it:
+
+```sh
+curl https://vector.<DNS_TLD>/healthz     # {"ok":true}
+```
+
+Use that address for `REACT_APP_VECTOR_SERVER_URL` in the UI and for `VECTOR_PUBLIC_URL`. A trusted certificate is
+required because a page served over HTTPS (for example on Vercel) cannot call a server whose certificate the browser
+rejects. The stack issues a publicly trusted wildcard certificate when you provide a DNS provider token, see
+[getting-started.md](getting-started.md#ssl-configuration).
 
 ### On the host, for development
 

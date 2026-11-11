@@ -29,6 +29,7 @@ test('only listed origins receive CORS headers and preflights are answered', asy
     const allowed = await fetch(`${base}/ping`, { headers: { Origin: 'https://ui.example.com' } });
     assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://ui.example.com');
     assert.equal(allowed.headers.get('access-control-allow-credentials'), null);
+    assert.match(allowed.headers.get('access-control-expose-headers') ?? '', /Content-Range/);
 
     const other = await fetch(`${base}/ping`, { headers: { Origin: 'https://evil.example.com' } });
     assert.equal(other.headers.get('access-control-allow-origin'), null);

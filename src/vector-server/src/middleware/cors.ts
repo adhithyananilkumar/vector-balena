@@ -43,7 +43,7 @@ export const createCors = (allowedOrigins: readonly string[]): RequestHandler =>
       return;
     }
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, Content-Range');
     if (req.method === 'OPTIONS' && req.get('Access-Control-Request-Method')) {
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', req.get('Access-Control-Request-Headers') ?? 'Authorization, Content-Type');

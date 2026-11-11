@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,9 +10,12 @@ import { writeFile } from 'node:fs/promises';
 import { readConfigFromImage } from './configuredImage';
 import {
   firstPartitionEnd,
+  openBaseImage,
+  openBootPatch,
   openConfiguredImage,
   parseDataDescriptor,
   readZipEntryInfo,
+  skipBytes,
   StreamedImageError,
   verifiedImage,
   withStallTimeout,
@@ -390,3 +393,104 @@ describe('data descriptor', () => {
     assert.deepEqual(await entry.trailer, { size: 4096, crc32: crc32(disk.subarray(0, 4096)) >>> 0 });
   });
 });
+
+describe('resuming, base images and boot patches', () => {
+  const config = { applicationId: 7, apiEndpoint: 'https://api.example.test', balenaRootCA: 'x'.repeat(6000), uuid: 'abc' };
+  const sha256 = (data: Buffer) => createHash('sha256').update(data).digest('hex');
+
+  it('skipBytes drops exactly the requested prefix, whatever the chunking', async () => {
+    for (const size of [4093, 100_000, disk.length]) {
+      const out = await collect(skipBytes(Readable.from(asChunks(disk, size)) as AsyncIterable<Buffer>, 123_457));
+      assert.ok(out.equals(disk.subarray(123_457)), `chunk size ${size}`);
+    }
+    assert.equal((await collect(skipBytes(Readable.from([Buffer.from('abc')]) as AsyncIterable<Buffer>, 0))).toString(), 'abc');
+    await assert.rejects(collect(skipBytes(Readable.from([Buffer.from('abc')]) as AsyncIterable<Buffer>, 10)), /shorter than the point/);
+  });
+
+  it('openBaseImage sends the image exactly as it is in the archive, checked against its checksum', async () => {
+    const opened = await openBaseImage('https://download.test/x.zip', { fetchImpl: balena(makeZip('balena.img', disk)), tmpDir: tmp });
+    assert.equal(opened.size, disk.length);
+    assert.ok((await collect(opened.stream)).equals(disk));
+    assert.equal(await opened.verification, true);
+  });
+
+  it('a resumed download is the rest of the same image, for plain and configured images', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 }); // FAT stamps config.json with the time
+    const zip = makeZip('balena.img', disk);
+    const whole = await collect((await openConfiguredImage('https://download.test/x.zip', config, { fetchImpl: balena(zip), tmpDir: tmp })).stream);
+    const end = bootEnd_();
+    // after the boot partition every run gives the same bytes
+    for (const from of [end, end + 1, end + 1_000_000, whole.length - 10]) {
+      const rest = await openConfiguredImage('https://download.test/x.zip', config, { fetchImpl: balena(zip), tmpDir: tmp, skip: from });
+      assert.ok((await collect(rest.stream)).equals(whole.subarray(from)), `configured, from ${from}`);
+    }
+    for (const from of [1, 4096, 1_000_000, whole.length - 10]) {
+      const plain = await openBaseImage('https://download.test/x.zip', { fetchImpl: balena(zip, { ranges: false }), tmpDir: tmp, skip: from });
+      assert.ok((await collect(plain.stream)).equals(disk.subarray(from)), `plain, from ${from}`);
+    }
+  });
+
+  it('refuses to resume a configured image from inside its boot partition and says to start again', async () => {
+    const zip = makeZip('balena.img', disk);
+    await assert.rejects(
+      openConfiguredImage('https://download.test/x.zip', config, { fetchImpl: balena(zip), tmpDir: tmp, skip: 4096 }),
+      (error: unknown) => error instanceof StreamedImageError && error.status === 409 && /Start it again/.test(error.message),
+    );
+  });
+
+  it('still refuses a corrupted image when it is resumed, because everything is checked before it is sent', async () => {
+    const zip = makeZip('balena.img', disk);
+    zip.writeUInt32LE(0xdeadbeef, zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 16);
+    const opened = await openBaseImage('https://download.test/x.zip', { fetchImpl: balena(zip), tmpDir: tmp, skip: 1000 });
+    await assert.rejects(collect(opened.stream), /integrity/);
+  });
+
+  it('a boot patch applied to a copy of the base image gives exactly the flash-ready image', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1_800_000_000_000 }); // FAT stamps config.json with the time
+    const zip = makeZip('balena.img', disk);
+    const patch = await openBootPatch('https://download.test/x.zip', config, { fetchImpl: balena(zip), tmpDir: tmp });
+    const bootEnd = bootEnd_();
+    assert.equal(patch.bootEnd, bootEnd);
+    assert.equal(patch.headSha256, sha256(disk.subarray(0, bootEnd)), 'identifies the base image it applies to');
+
+    const patched = Buffer.from(disk);
+    for (const part of patch.patches) part.data.copy(patched, part.offset);
+    const flashReady = await collect((await openConfiguredImage('https://download.test/x.zip', config, { fetchImpl: balena(zip), tmpDir: tmp })).stream);
+    assert.ok(patched.equals(flashReady), 'identical to the streamed flash-ready image');
+
+    const total = patch.patches.reduce((n, part) => n + part.data.length, 0);
+    assert.ok(total > 0 && total < 256 * 1024, `only a few blocks change (${total} bytes)`);
+    assert.ok(patch.patches.every((part) => part.offset + part.data.length <= bootEnd), 'nothing outside the boot partition changes');
+    assert.equal(patch.fileName, 'balena.img');
+  });
+
+  it('a boot patch reads only the start of the download, not the whole image', async () => {
+    const zip = makeZip('balena.img', disk);
+    let pulled = 0;
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      if ((init?.headers as Record<string, string> | undefined)?.range) return new Response('', { status: 416 });
+      async function* chunks() {
+        for (let i = 0; i < zip.length; i += 64 * 1024) {
+          pulled += Math.min(64 * 1024, zip.length - i);
+          yield zip.subarray(i, i + 64 * 1024);
+        }
+      }
+      return new Response(Readable.toWeb(Readable.from(chunks())) as never, { status: 200, headers: { 'content-length': String(zip.length) } });
+    }) as unknown as typeof fetch;
+    await openBootPatch('https://download.test/x.zip', config, { fetchImpl, tmpDir: tmp });
+    assert.ok(pulled < zip.length / 2, `read ${pulled} of ${zip.length} archive bytes`);
+  });
+
+  it('leaves no temporary files behind, also when it fails', async () => {
+    const scratch = await mkdtemp(path.join(tmp, 'd-'));
+    await openBootPatch('https://download.test/x.zip', config, { fetchImpl: balena(makeZip('balena.img', disk)), tmpDir: scratch });
+    await assert.rejects(openBootPatch('https://download.test/x.zip', config, { fetchImpl: balena(makeZip('balena.img', Buffer.alloc(8192, 1))), tmpDir: scratch }), /partition table/);
+    assert.deepEqual(await readdir(scratch), []);
+  });
+});
+
+const bootEnd_ = (): number => {
+  const result = firstPartitionEnd(disk);
+  if (!('end' in result)) throw new Error('fixture has no partition table');
+  return result.end;
+};

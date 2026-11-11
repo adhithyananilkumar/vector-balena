@@ -142,3 +142,53 @@ describe('dnsServers', () => {
     assert.equal(config.dnsServers, '10.0.2.2 1.1.1.1');
   });
 });
+
+describe('generateConfig for an already registered device', () => {
+  const uuid = 'a'.repeat(32);
+  const ok = { appId: 7, deviceType: 'raspberrypi4-64', version: '9.0.3+rev2', provisioning: 'device', deviceUuid: uuid };
+
+  const api = (options: { fleet?: number; found?: boolean; keyStatus?: number; keyBody?: string } = {}) => {
+    const calls: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(`${init?.method ?? 'GET'} ${url.replace('https://api.test', '')}`);
+      if (url.endsWith('/download-config')) return new Response(JSON.stringify({ apiKey: 'shared-provisioning-key', apiEndpoint: 'https://api.test' }));
+      if (url.includes('/v7/device?')) {
+        const row = { id: 5, uuid, created_at: '2026-11-01T10:00:00.000Z', belongs_to__application: [{ __id: options.fleet ?? 7 }] };
+        return new Response(JSON.stringify({ d: options.found === false ? [] : [row] }));
+      }
+      if (url.endsWith('/api-key/device/5/device-key')) return new Response(options.keyBody ?? '"device-key-123"', { status: options.keyStatus ?? 200 });
+      return new Response('unexpected', { status: 500 });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, calls };
+  };
+
+  it('gives the device its own key in place of the shared one, without registering anything', async () => {
+    const { fetchImpl, calls } = api();
+    const { config, device } = await generateConfig('https://api.test', 'Bearer t', parseFleetConfigRequest(ok), fetchImpl);
+    assert.equal(config.apiKey, undefined, 'the shared provisioning key is not in a single-device image');
+    assert.equal(config.deviceApiKey, 'device-key-123');
+    assert.equal(config.uuid, uuid);
+    assert.equal(config.deviceId, 5);
+    assert.equal(config.registered_at, Math.floor(Date.parse('2026-11-01T10:00:00.000Z') / 1000), 'keeps the original registration time');
+    assert.deepEqual(device, { id: 5, uuid });
+    assert.ok(!calls.some((call) => call.includes('/device/register')), 'no second device is registered');
+  });
+
+  it('accepts a key the API sends without quotes', async () => {
+    const { config } = await generateConfig('https://api.test', 'Bearer t', parseFleetConfigRequest(ok), api({ keyBody: 'plain-key-456' }).fetchImpl);
+    assert.equal(config.deviceApiKey, 'plain-key-456');
+  });
+
+  it('refuses a device from another fleet, an unknown device and a refused key', async () => {
+    await assert.rejects(generateConfig('https://api.test', 'Bearer t', parseFleetConfigRequest(ok), api({ fleet: 9 }).fetchImpl), /does not belong to the chosen fleet/);
+    await assert.rejects(generateConfig('https://api.test', 'Bearer t', parseFleetConfigRequest(ok), api({ found: false }).fetchImpl), /not found/);
+    await assert.rejects(generateConfig('https://api.test', 'Bearer t', parseFleetConfigRequest(ok), api({ keyStatus: 403 }).fetchImpl), /may not create a key/);
+  });
+
+  it('validates the uuid and ignores it unless a single device is asked for', () => {
+    assert.throws(() => parseFleetConfigRequest({ ...ok, deviceUuid: "x' or 1 eq 1 or uuid eq '" }), /valid device uuid/);
+    assert.equal(parseFleetConfigRequest({ ...ok, provisioning: 'fleet' }).deviceUuid, undefined);
+    assert.equal(parseFleetConfigRequest({ ...ok, deviceUuid: 'b'.repeat(62) }).deviceUuid, 'b'.repeat(62));
+  });
+});

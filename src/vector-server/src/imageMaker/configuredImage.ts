@@ -19,6 +19,8 @@ export interface FleetConfigRequest {
   developmentMode: boolean;
   /** fleet: any device can use the image; device: the device is registered now and gets its own key. */
   provisioning: 'fleet' | 'device';
+  /** With provisioning "device": an already registered device to make the image for (otherwise a new one is registered). */
+  deviceUuid?: string;
   network: 'ethernet' | 'wifi';
   wifiSsid?: string;
   wifiKey?: string;
@@ -49,6 +51,15 @@ const parseDnsServers = (value: unknown): string[] | undefined => {
   return servers;
 };
 
+/** A device uuid as the API prints it: 32 or 62 hex digits. */
+const parseDeviceUuid = (value: unknown): string | undefined => {
+  if (value == null || value === '') return undefined;
+  if (typeof value !== 'string' || !/^([0-9a-f]{32}|[0-9a-f]{62})$/.test(value)) {
+    throw new BaseImageValidationError('That is not a valid device uuid.');
+  }
+  return value;
+};
+
 /** Validates the wizard's answers; nothing else is ever forwarded to the API. */
 export const parseFleetConfigRequest = (body: unknown): FleetConfigRequest => {
   const input = (body ?? {}) as Record<string, unknown>;
@@ -72,6 +83,7 @@ export const parseFleetConfigRequest = (body: unknown): FleetConfigRequest => {
     version: assertVersion(input.version),
     developmentMode: input.developmentMode === true,
     provisioning: input.provisioning === 'device' ? 'device' : 'fleet',
+    deviceUuid: input.provisioning === 'device' ? parseDeviceUuid(input.deviceUuid) : undefined,
     network,
     wifiSsid: network === 'wifi' ? wifiSsid : undefined,
     wifiKey: network === 'wifi' ? wifiKey : undefined,
@@ -145,6 +157,7 @@ export const generateConfig = async (
 ): Promise<GeneratedConfig> => {
   const config = await fetchFleetConfig(apiUrl, authorization, request, fetchImpl);
   if (request.provisioning !== 'device') return { config };
+  if (request.deviceUuid) return configForExistingDevice(apiUrl, authorization, request, config, fetchImpl);
 
   const provisioningKey = config.apiKey;
   if (typeof provisioningKey !== 'string' || !provisioningKey) {
@@ -203,3 +216,61 @@ export const readConfigFromImage = async (imagePath: string): Promise<Record<str
       }),
     ),
   );
+
+const apiBase = (apiUrl: string): string => apiUrl.replace(/\/+$/, '');
+
+/**
+ * The config for a device that is already registered (for example one registered earlier, whose image was never
+ * made): the fleet config with a new key for that one device in place of the shared provisioning key, which is what
+ * `balena config generate --device` does. The device must belong to the fleet the image is for.
+ */
+const configForExistingDevice = async (
+  apiUrl: string,
+  authorization: string,
+  request: FleetConfigRequest,
+  config: Record<string, unknown>,
+  fetchImpl: typeof fetch,
+): Promise<GeneratedConfig> => {
+  const base = apiBase(apiUrl);
+  const call = async (path: string, init: RequestInit = {}): Promise<Response> => {
+    try {
+      return await fetchImpl(`${base}${path}`, {
+        ...init,
+        headers: { 'content-type': 'application/json', authorization, ...(init.headers as Record<string, string> | undefined) },
+      });
+    } catch {
+      throw new ConfigGenerationError('The balena API could not be reached.');
+    }
+  };
+
+  const lookup = await call(
+    `/v7/device?$select=id,uuid,created_at,belongs_to__application&$filter=uuid%20eq%20'${request.deviceUuid}'`,
+  );
+  if (lookup.status === 401 || lookup.status === 403) throw new ConfigGenerationError('You do not have access to that device.', 403);
+  if (!lookup.ok) throw new ConfigGenerationError(`The device could not be looked up (HTTP ${lookup.status}).`);
+  const found = ((await lookup.json()) as { d?: Array<{ id?: number; uuid?: string; created_at?: string; belongs_to__application?: { __id?: number } | Array<{ __id?: number }> }> }).d?.[0];
+  if (!found || typeof found.id !== 'number' || typeof found.uuid !== 'string') {
+    throw new ConfigGenerationError('That device was not found.', 404);
+  }
+  const fleet = Array.isArray(found.belongs_to__application) ? found.belongs_to__application[0]?.__id : found.belongs_to__application?.__id;
+  if (fleet !== request.appId) {
+    throw new ConfigGenerationError('That device does not belong to the chosen fleet.', 400);
+  }
+
+  const keyResponse = await call(`/api-key/device/${found.id}/device-key`, {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Vector image', description: 'Created by Add device' }),
+  });
+  if (keyResponse.status === 401 || keyResponse.status === 403) throw new ConfigGenerationError('You may not create a key for that device.', 403);
+  if (!keyResponse.ok) throw new ConfigGenerationError(`A key for the device could not be created (HTTP ${keyResponse.status}).`);
+  const raw = (await keyResponse.text()).trim();
+  const key = raw.startsWith('"') ? (JSON.parse(raw) as string) : raw;
+  if (!key || /[\s{}]/.test(key)) throw new ConfigGenerationError('The API returned an unexpected device key.');
+
+  const { apiKey: _shared, ...rest } = config;
+  const created = found.created_at ? Math.floor(new Date(found.created_at).getTime() / 1000) : Math.floor(Date.now() / 1000);
+  return {
+    config: { ...rest, deviceId: found.id, uuid: found.uuid, deviceApiKey: key, registered_at: Number.isFinite(created) ? created : Math.floor(Date.now() / 1000) },
+    device: { id: found.id, uuid: found.uuid },
+  };
+};

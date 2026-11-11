@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, open, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdtemp, open, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -220,10 +221,16 @@ export const zipFirstEntry = async (
           fed += chunk.length;
           if (recent.length > 8) recent.shift();
           if (!inflate.write(chunk)) {
-            // "close" as well: a destroyed stream never drains, and waiting for it would hang the cleanup
+            // "close" as well: a destroyed stream never drains, and waiting for it would hang the cleanup.
+            // Whichever comes first removes the other listener, so none pile up over a multi-gigabyte image.
             await new Promise<void>((resolve) => {
-              inflate.once('drain', resolve);
-              inflate.once('close', resolve);
+              const done = () => {
+                inflate.off('drain', done);
+                inflate.off('close', done);
+                resolve();
+              };
+              inflate.once('drain', done);
+              inflate.once('close', done);
             });
           }
         }
@@ -258,7 +265,71 @@ export interface ConfiguredImageOptions {
   /** Where the temporary boot-partition file is made (default: the system temp folder). */
   tmpDir?: string;
   maxHeadBytes?: number;
+  /** Resume position of this download: it may not fall inside the boot partition (see withConfigInBootPartition). */
+  skip?: number;
 }
+
+/**
+ * Reads the start of a disk image, up to the end of its first (boot) partition, into `headPath`. Returns where that
+ * partition ends and the bytes of the chunk that crossed the boundary (they belong to the rest of the image).
+ */
+const captureHead = async (
+  iterator: AsyncIterator<Buffer>,
+  headPath: string,
+  limit: number,
+): Promise<{ headEnd: number; leftover: Buffer }> => {
+  let leftover: Buffer = Buffer.alloc(0);
+  const file = await open(headPath, 'w+');
+  let written = 0;
+  let known = Buffer.alloc(0); // first sectors, to read the partition table
+  let headEnd: number | undefined;
+  try {
+    while (headEnd === undefined || written < headEnd) {
+      const next = await iterator.next();
+      if (next.done) throw new StreamedImageError('The image ended before its boot partition did.');
+      let chunk = next.value;
+      if (headEnd === undefined && known.length < 64 * 1024) {
+        known = Buffer.concat([known, chunk.subarray(0, 64 * 1024 - known.length)]);
+        const result = firstPartitionEnd(known);
+        if ('end' in result) {
+          if (result.end > limit) throw new StreamedImageError('The first partition of this image is unexpectedly large.');
+          headEnd = result.end;
+        } else if (known.length >= 64 * 1024) {
+          throw new StreamedImageError('The disk image partition table is not readable.');
+        }
+      }
+      if (headEnd !== undefined && written + chunk.length > headEnd) {
+        leftover = chunk.subarray(headEnd - written);
+        chunk = chunk.subarray(0, headEnd - written);
+      }
+      try {
+        await file.write(chunk, 0, chunk.length, written);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOSPC') {
+          throw new StreamedImageError('The server has no temporary disk space left to prepare the image.', 507);
+        }
+        throw error;
+      }
+      written += chunk.length;
+      if (written > limit) throw new StreamedImageError('The first partition of this image is unexpectedly large.');
+    }
+  } finally {
+    await file.close();
+  }
+  return { headEnd: headEnd as number, leftover };
+};
+
+/** Writes `config` into the boot partition of the head file and proves it is there, without changing the size. */
+const writeAndCheckConfig = async (headPath: string, headEnd: number, config: Record<string, unknown>): Promise<void> => {
+  await writeConfigToImage(headPath, config);
+  if ((await stat(headPath)).size !== headEnd) {
+    throw new StreamedImageError('Writing the configuration changed the image size.', 500);
+  }
+  const check = await readConfigFromImage(headPath);
+  if (JSON.stringify(check) !== JSON.stringify(config)) {
+    throw new StreamedImageError('The configuration could not be written into the image.', 500);
+  }
+};
 
 /**
  * Takes the raw disk image bytes and yields the same image with `config` written into its boot partition.
@@ -273,55 +344,15 @@ export async function* withConfigInBootPartition(
   const iterator = image[Symbol.asyncIterator]();
   const dir = await mkdtemp(path.join(options.tmpDir ?? tmpdir(), 'vector-image-'));
   const headPath = path.join(dir, 'head.img');
-  const limit = options.maxHeadBytes ?? MAX_HEAD_BYTES;
-  let leftover: Buffer = Buffer.alloc(0);
   try {
-    const file = await open(headPath, 'w+');
-    let written = 0;
-    let known = Buffer.alloc(0); // first sectors, to read the partition table
-    let headEnd: number | undefined;
-    try {
-      while (headEnd === undefined || written < headEnd) {
-        const next = await iterator.next();
-        if (next.done) throw new StreamedImageError('The image ended before its boot partition did.');
-        let chunk = next.value;
-        if (headEnd === undefined && known.length < 64 * 1024) {
-          known = Buffer.concat([known, chunk.subarray(0, 64 * 1024 - known.length)]);
-          const result = firstPartitionEnd(known);
-          if ('end' in result) {
-            if (result.end > limit) throw new StreamedImageError('The first partition of this image is unexpectedly large.');
-            headEnd = result.end;
-          } else if (known.length >= 64 * 1024) {
-            throw new StreamedImageError('The disk image partition table is not readable.');
-          }
-        }
-        if (headEnd !== undefined && written + chunk.length > headEnd) {
-          leftover = chunk.subarray(headEnd - written);
-          chunk = chunk.subarray(0, headEnd - written);
-        }
-        try {
-          await file.write(chunk, 0, chunk.length, written);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOSPC') {
-            throw new StreamedImageError('The server has no temporary disk space left to prepare the image.', 507);
-          }
-          throw error;
-        }
-        written += chunk.length;
-        if (written > limit) throw new StreamedImageError('The first partition of this image is unexpectedly large.');
-      }
-    } finally {
-      await file.close();
+    const { headEnd, leftover } = await captureHead(iterator, headPath, options.maxHeadBytes ?? MAX_HEAD_BYTES);
+    // Writing config.json stamps the file with the time, so the boot partition differs by a few bytes from one run to
+    // the next. Stitching two runs together inside it would give a file no run ever produced; after it, the bytes are
+    // the image exactly as published and any run gives the same.
+    if (options.skip && options.skip > 0 && options.skip < headEnd) {
+      throw new StreamedImageError('This download can only be resumed from a later point. Start it again from the beginning.', 409);
     }
-
-    await writeConfigToImage(headPath, config);
-    if ((await stat(headPath)).size !== written) {
-      throw new StreamedImageError('Writing the configuration changed the image size.', 500);
-    }
-    const check = await readConfigFromImage(headPath);
-    if (JSON.stringify(check) !== JSON.stringify(config)) {
-      throw new StreamedImageError('The configuration could not be written into the image.', 500);
-    }
+    await writeAndCheckConfig(headPath, headEnd, config);
 
     for await (const chunk of createReadStream(headPath, { highWaterMark: 1024 * 1024 })) yield chunk as Buffer;
     await rm(dir, { recursive: true, force: true }); // the boot partition is gone from disk before the long tail starts
@@ -336,6 +367,102 @@ export async function* withConfigInBootPartition(
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+/** Drops the first `count` bytes of a stream: how a download resumes where an interrupted one stopped. */
+export async function* skipBytes(source: AsyncIterable<Buffer>, count: number): AsyncGenerator<Buffer> {
+  let left = count;
+  for await (const chunk of source) {
+    if (left <= 0) {
+      yield chunk;
+    } else if (chunk.length <= left) {
+      left -= chunk.length;
+    } else {
+      yield chunk.subarray(left);
+      left = 0;
+    }
+  }
+  if (left > 0) throw new StreamedImageError('The image is shorter than the point the download should resume from.', 416);
+}
+
+export interface BootPatch {
+  /** Where the boot partition ends: the patches all lie before this offset. */
+  bootEnd: number;
+  /** SHA-256 of the image's first `bootEnd` bytes as balena publishes them, so a local copy can be matched to it. */
+  headSha256: string;
+  /** The blocks that differ once config.json is in, to be written over a copy of the same image. */
+  patches: Array<{ offset: number; data: Buffer }>;
+}
+
+const PATCH_BLOCK = 4096;
+const MAX_PATCH_BYTES = 16 * 1024 * 1024;
+
+const sha256OfFile = async (filePath: string): Promise<string> => {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(filePath, { highWaterMark: 1024 * 1024 })) hash.update(chunk as Buffer);
+  return hash.digest('hex');
+};
+
+/** Contiguous runs of blocks that differ between two files of equal length. */
+const diffFiles = async (originalPath: string, patchedPath: string, size: number): Promise<BootPatch['patches']> => {
+  const [original, patched] = await Promise.all([open(originalPath, 'r'), open(patchedPath, 'r')]);
+  const patches: BootPatch['patches'] = [];
+  let total = 0;
+  try {
+    const a = Buffer.alloc(PATCH_BLOCK);
+    const b = Buffer.alloc(PATCH_BLOCK);
+    let current: { offset: number; parts: Buffer[] } | undefined;
+    const flush = () => {
+      if (!current) return;
+      const data = Buffer.concat(current.parts);
+      total += data.length;
+      if (total > MAX_PATCH_BYTES) throw new StreamedImageError('Writing the configuration changed far more of the image than expected.', 500);
+      patches.push({ offset: current.offset, data });
+      current = undefined;
+    };
+    for (let offset = 0; offset < size; offset += PATCH_BLOCK) {
+      const length = Math.min(PATCH_BLOCK, size - offset);
+      await Promise.all([original.read(a, 0, length, offset), patched.read(b, 0, length, offset)]);
+      if (a.compare(b, 0, length, 0, length) !== 0) {
+        const block = Buffer.from(b.subarray(0, length));
+        if (current && current.offset + current.parts.reduce((n, part) => n + part.length, 0) === offset) current.parts.push(block);
+        else {
+          flush();
+          current = { offset, parts: [block] };
+        }
+      } else {
+        flush();
+      }
+    }
+    flush();
+  } finally {
+    await Promise.all([original.close(), patched.close()]);
+  }
+  return patches;
+};
+
+/**
+ * What it takes to turn a local copy of the base image into a flash-ready one: the few blocks of the boot partition
+ * that change when config.json is written. Only the start of the image is read; the rest is never downloaded.
+ */
+export const bootPatchFromImage = async (
+  image: AsyncIterable<Buffer>,
+  config: Record<string, unknown>,
+  options: ConfiguredImageOptions = {},
+): Promise<BootPatch> => {
+  const iterator = image[Symbol.asyncIterator]();
+  const dir = await mkdtemp(path.join(options.tmpDir ?? tmpdir(), 'vector-patch-'));
+  const originalPath = path.join(dir, 'original.img');
+  const patchedPath = path.join(dir, 'patched.img');
+  try {
+    const { headEnd } = await captureHead(iterator, originalPath, options.maxHeadBytes ?? MAX_HEAD_BYTES);
+    await copyFile(originalPath, patchedPath);
+    await writeAndCheckConfig(patchedPath, headEnd, config);
+    return { bootEnd: headEnd, headSha256: await sha256OfFile(originalPath), patches: await diffFiles(originalPath, patchedPath, headEnd) };
+  } finally {
+    await iterator.return?.().catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  }
+};
 
 export interface ZipEntryInfo {
   name: string;
@@ -490,6 +617,8 @@ export interface OpenImageOptions extends ConfiguredImageOptions {
   connectTimeoutMs?: number;
   /** How long the download may go without a single byte before it is given up (default 60 s). */
   stallTimeoutMs?: number;
+  /** Resume: start sending at this byte of the image (the earlier bytes are read and dropped). */
+  skip?: number;
 }
 
 export interface OpenedImage {
@@ -501,16 +630,14 @@ export interface OpenedImage {
   verification: Promise<boolean>;
 }
 
-/**
- * Starts downloading `url` (a balenaOS zip) and returns a stream of the configured disk image. Resolves once the
- * boot partition has been patched, so callers can still answer with an error status if anything went wrong.
- * Closing the returned stream also stops the download from balena.
- */
-export const openConfiguredImage = async (
-  url: string,
-  config: Record<string, unknown>,
-  options: OpenImageOptions = {},
-): Promise<OpenedImage> => {
+interface OpenedEntry {
+  entry: Awaited<ReturnType<typeof zipFirstEntry>>;
+  info: ZipEntryInfo | undefined;
+  controller: AbortController;
+}
+
+/** Starts the balena download and reads the zip header. Closing `controller` stops the download. */
+const openZipEntry = async (url: string, options: OpenImageOptions): Promise<OpenedEntry> => {
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
   const connectTimer = setTimeout(() => controller.abort(), options.connectTimeoutMs ?? 30_000);
@@ -530,20 +657,34 @@ export const openConfiguredImage = async (
       response.status === 404 ? 404 : 502,
     );
   }
-
-  const zipSize = Number(response.headers.get('content-length'));
-  const info = Number.isFinite(zipSize) && zipSize > 0 ? await readZipEntryInfo(url, zipSize, fetchImpl) : undefined;
-
   try {
+    const zipSize = Number(response.headers.get('content-length'));
+    const info = Number.isFinite(zipSize) && zipSize > 0 ? await readZipEntryInfo(url, zipSize, fetchImpl) : undefined;
     const source = withStallTimeout(Readable.fromWeb(response.body as never) as AsyncIterable<Buffer>, options.stallTimeoutMs ?? 60_000);
-    const entry = await zipFirstEntry(source);
+    return { entry: await zipFirstEntry(source), info, controller };
+  } catch (error) {
+    controller.abort();
+    throw error;
+  }
+};
+
+/**
+ * Starts downloading `url` (a balenaOS zip) and returns a stream of the disk image: with `config` written into its
+ * boot partition, or as it is when `config` is undefined. Resolves once the first bytes are ready (the boot
+ * partition has been patched), so callers can still answer with an error status if anything went wrong.
+ * Closing the returned stream also stops the download from balena.
+ */
+const openImage = async (url: string, config: Record<string, unknown> | undefined, options: OpenImageOptions): Promise<OpenedImage> => {
+  const { entry, info, controller } = await openZipEntry(url, options);
+  try {
     let reportVerification!: (checked: boolean) => void;
     const verification = new Promise<boolean>((resolve) => {
       reportVerification = resolve;
     });
     verification.catch(() => undefined);
-    const image = verifiedImage(entry.data, info ?? (() => entry.trailer), undefined, reportVerification);
-    const generator = withConfigInBootPartition(image, config, options);
+    const checked = verifiedImage(entry.data, info ?? (() => entry.trailer), undefined, reportVerification);
+    let generator: AsyncGenerator<Buffer> = config ? withConfigInBootPartition(checked, config, options) : checked;
+    if (options.skip && options.skip > 0) generator = skipBytes(generator, options.skip);
     const first = await generator.next();
     if (first.done) throw new StreamedImageError('The download was empty.');
     const stream = Readable.from(
@@ -560,9 +701,34 @@ export const openConfiguredImage = async (
       { objectMode: false },
     );
     stream.once('close', () => reportVerification(false)); // no-op when the check already settled it
-    return { stream, fileName: path.basename(entry.name), size: info?.size, verification };
+    return { stream, fileName: path.basename(entry.name), size: info ? info.size : undefined, verification };
   } catch (error) {
     controller.abort();
     throw error;
+  }
+};
+
+/** The balenaOS image with `config` written into its boot partition. */
+export const openConfiguredImage = (url: string, config: Record<string, unknown>, options: OpenImageOptions = {}): Promise<OpenedImage> =>
+  openImage(url, config, options);
+
+/** The balenaOS image exactly as balena publishes it (verified against its checksum), to keep as a local base image. */
+export const openBaseImage = (url: string, options: OpenImageOptions = {}): Promise<OpenedImage> => openImage(url, undefined, options);
+
+/**
+ * The few blocks that make a local copy of the base image flash-ready. Reads only the start of balena's download
+ * (a few megabytes compressed) and stops it.
+ */
+export const openBootPatch = async (
+  url: string,
+  config: Record<string, unknown>,
+  options: OpenImageOptions = {},
+): Promise<BootPatch & { fileName: string }> => {
+  const { entry, controller } = await openZipEntry(url, options);
+  try {
+    const patch = await bootPatchFromImage(entry.data, config, options);
+    return { ...patch, fileName: path.basename(entry.name) };
+  } finally {
+    controller.abort();
   }
 };

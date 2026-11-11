@@ -30,3 +30,20 @@ describe('ImageTickets', () => {
     assert.notEqual(tickets.create({}, 'a', '1').id, tickets.create({}, 'a', '1').id);
   });
 });
+
+describe('base image tickets', () => {
+  it('carry no config and have their own file name, but sign and expire like the others', () => {
+    let clock = 1_000_000;
+    const tickets = new ImageTickets({ secret: 'secret', now: () => clock });
+    const base = tickets.createBase('raspberrypi4-64', '9.0.3+rev2', 'admin');
+    assert.equal(base.kind, 'base');
+    assert.equal(base.config, undefined);
+    assert.equal(base.fileName, 'balenaOS-raspberrypi4-64-9.0.3_rev2.img');
+    assert.equal(base.createdBy, 'admin');
+    const { expires, signature } = tickets.sign(base.id);
+    assert.ok(tickets.verify(base.id, expires, signature));
+    assert.equal(tickets.create({ a: 1 }, 'x', '1').kind, 'configured');
+    clock += 31 * 60 * 1000;
+    assert.equal(tickets.get(base.id), undefined);
+  });
+});

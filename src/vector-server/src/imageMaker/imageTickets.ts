@@ -11,8 +11,10 @@ export interface ImageTicket {
   createdAt: number;
   /** How many times the image was started: a ticket is good for a few retries, not for unlimited copies. */
   downloads: number;
-  /** The config.json to write into the image. Held in memory only, never on disk. */
-  config: Record<string, unknown>;
+  /** "configured": the image with a fleet's config.json written in. "base": the image exactly as balena publishes it. */
+  kind: 'configured' | 'base';
+  /** The config.json to write into the image (configured images only). Held in memory only, never on disk. */
+  config?: Record<string, unknown>;
 }
 
 export interface ImageTicketsOptions {
@@ -54,10 +56,29 @@ export class ImageTickets {
       version,
       deviceUuid,
       fileName: `vector-${deviceType}-${version.replace(/[^0-9A-Za-z.-]/g, '_')}.img`,
+      kind: 'configured',
       createdBy,
       createdAt: this.now(),
       downloads: 0,
       config,
+    };
+    this.tickets.set(id, ticket);
+    return ticket;
+  }
+
+  /** Permission to download one base image (no fleet, no key inside). */
+  createBase(deviceType: string, version: string, createdBy = 'unknown'): ImageTicket {
+    this.expire();
+    const id = randomBytes(16).toString('hex');
+    const ticket: ImageTicket = {
+      id,
+      deviceType,
+      version,
+      fileName: `balenaOS-${deviceType}-${version.replace(/[^0-9A-Za-z.-]/g, '_')}.img`,
+      kind: 'base',
+      createdBy,
+      createdAt: this.now(),
+      downloads: 0,
     };
     this.tickets.set(id, ticket);
     return ticket;

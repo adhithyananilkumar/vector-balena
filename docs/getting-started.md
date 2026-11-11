@@ -423,8 +423,8 @@ The project will have been successfully built when a friendly unicorn appears in
 terminal:
 
 ```bash
-[Info]    No "docker-compose.yml" file found at "~/open-balena/balena-idle"
-[Info]    Creating default composition with source: "~/open-balena/balena-idle"
+[Info]    No "docker-compose.yml" file found at "~/vector-balena/balena-idle"
+[Info]    Creating default composition with source: "~/vector-balena/balena-idle"
 [Info]    Everything is up to date (use --build to force a rebuild)
 [Info]    Creating release...
 [Info]    Pushing images to registry...

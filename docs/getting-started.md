@@ -334,7 +334,7 @@ At any time, the server can be queried for all the applications it knows about
 with the following command:
 
 ```bash
-balena fleets
+balena fleet list
  Id App name Slug        Device type  Device count Online devices
  ── ──────── ─────────── ──────────── ──────────── ──────────────
  1  myApp    admin/myapp raspberrypi3 0            0
@@ -362,7 +362,7 @@ Insert the SD card into the device and power it on. The device will register wit
 openBalena server and after about two minutes will be inspectable:
 
 ```bash
-balena devices
+balena device list
 ID UUID    DEVICE NAME DEVICE TYPE  FLEET       STATUS IS ONLINE SUPERVISOR VERSION OS VERSION
 1  560dcc2 quiet-rock  raspberrypi3 admin/myapp Idle   true      16.1.10            balenaOS 5.2.8
 
@@ -463,7 +463,7 @@ devices and within a couple of minutes, they will all run the new release. Logs 
 viewed with:
 
 ```bash
-balena logs --tail 560dcc2
+balena device logs --tail 560dcc2
 [Logs]    [2024-05-02T15:59:31.383Z] Supervisor starting
 [Logs]    [2024-05-02T15:59:37.552Z] Applying configuration change {"SUPERVISOR_VPN_CONTROL":"true"}
 [Logs]    [2024-05-02T15:59:37.599Z] Applied configuration change {"SUPERVISOR_VPN_CONTROL":"true"}

@@ -5,6 +5,7 @@ on:
     paths:
       - 'src/vector-server/**'
       - '.github/workflows/vector-server.yml'
+  workflow_dispatch:
   pull_request:
     paths:
       - 'src/vector-server/**'
@@ -12,6 +13,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: vector-server-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 defaults:
   run:
@@ -55,3 +60,76 @@ jobs:
         run: npx tsx --test test/balenaOsSync.integration.test.ts
         env:
           BALENA_OS_INTEGRATION: '1'
+
+  # Continuous deployment: only after the checks above pass, only from master, one deploy at a time.
+  # Secrets (repository settings, environment "production"):
+  #   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY (private key), DEPLOY_KNOWN_HOSTS (output of `ssh-keyscan -t ed25519 host`),
+  #   DEPLOY_PATH (the checkout of this repository on the server, where docker-compose.yml and .env live).
+  deploy:
+    name: Deploy to the server
+    needs: [test, balena-os-api-integration]
+    if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    concurrency:
+      group: vector-server-deploy
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Prepare SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Pull, rebuild and restart vector-server (rolls back if it does not become healthy)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+            "DEPLOY_PATH='$DEPLOY_PATH' SHA='$SHA' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          previous=$(git rev-parse HEAD)
+          wait_healthy() {
+            id=$(docker compose ps -q vector-server)
+            for _ in $(seq 1 36); do
+              status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo missing)
+              [ "$status" = healthy ] || [ "$status" = running ] && return 0
+              sleep 5
+            done
+            return 1
+          }
+          git fetch origin master
+          git merge --ff-only "$SHA"
+          docker compose up -d --build vector-server
+          if wait_healthy; then
+            echo "Deployed $SHA"
+            docker image prune -f >/dev/null
+          else
+            echo "vector-server did not become healthy: rolling back to $previous" >&2
+            docker compose logs --tail 80 vector-server >&2 || true
+            git reset --hard "$previous"
+            docker compose up -d --build vector-server
+            exit 1
+          fi
+          REMOTE
+
+      - name: Check the live server
+        run: |
+          for _ in 1 2 3 4 5 6; do
+            curl -fsS --max-time 10 "https://${{ vars.VECTOR_SERVER_HOST }}/healthz" && exit 0
+            sleep 10
+          done
+          echo "The public /healthz did not answer." >&2
+          exit 1

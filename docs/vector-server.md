@@ -24,7 +24,7 @@ handles what that API cannot or must not do from a browser.
 | ---- | ------ | ------------ | --------- |
 | Admin database | `/admin-db/*` | Allowlisted PostgREST access plus actions (create user, API keys, change password, role-aware deletions). Enforces roles and organization scope. | [access-controls.md](access-controls.md), [direct-db-access.md](direct-db-access.md) |
 | Host OS and Supervisor updates | `/balena-os/*`, `/device-update-options`, `/device-supervisor-target` | Syncs balenaOS and Supervisor releases from the public catalog and assigns update targets. | [os-and-supervisor-updates.md](os-and-supervisor-updates.md) |
-| Image maker | `/image-maker/*` | Streams a balenaOS image from balena's download service to the browser with a fleet's `config.json` written into its boot partition, behind a signed, short-lived link. Nothing is stored on the server. | [Add device](https://github.com/adhithyananilkumar/vector-balena-ui/blob/main/src/vector/docs/content/add-device.md) |
+| Image maker | `/image-maker/*` | Registers devices and generates a fleet or device `config.json`, and lists balenaOS versions. OS images are not downloaded or stored by the server. |
 | Remote access | `/remote/session`, `/remote/ws`, `/remote/sftp/*` | Browser terminals and streaming SFTP to devices through the openBalena VPN tunnel, with per-user ephemeral SSH keys. | [remote-access.md](remote-access.md) |
 | Delta records | `/deltas/records` | Build times and sizes of delta updates, for the Delta builds page. | [delta-updates.md](delta-updates.md) |
 | Registry cleanup | `/deleteRegistryImage`, `/deleteOrphanedRegistryImages` | Removes image blobs when images are deleted in the UI. | |
@@ -57,27 +57,14 @@ Useful overrides (shell environment or the stack's `.env`):
 
 Learned SSH host keys are stored in the `vector-data` volume. OS images are not stored on the server at all.
 
-### OS image downloads: integrity and audit
+### Device config and audit
 
-The Add device page streams a balenaOS image through the server: it is unzipped as it arrives, `config.json` is written into the boot partition, and the result goes to the browser. Only that boot partition (tens of megabytes) touches the server's disk, in a temporary file that is removed before the rest is sent.
+Vector does not download, stream or store OS images. The Add device page makes the device's `config.json` (and registers the device when asked) and shows the steps to install balenaOS from balena's own download page.
 
-- The data is checked against the CRC-32 and size recorded in balena's zip. The last megabyte is held back until the check passes, so a damaged or truncated image fails instead of looking complete.
-- A download that receives nothing for 60 seconds, or whose balena connection is lost, fails with an error.
-- A prepared image can be started 5 times and is discarded after 30 minutes; at most `VECTOR_IMAGE_MAX_STREAMS` images stream at once.
-- Every prepare and download writes one JSON line to the server log (`docker compose logs vector-server`) with `"audit":"os-image"`: who prepared it, the device type, version, whether a device was registered, the sender address, the bytes sent, the time taken, whether the checksum matched (`verified`) and the error if it failed:
-
-```json
-{"audit":"os-image","at":"2026-11-11T11:22:23.224Z","ticket":"3d7a…","deviceType":"raspberrypi4-64","version":"9.0.3+rev2","event":"download-finished","bytes":952107008,"verified":true,"ms":12213}
-```
-
-Events are `image-prepared`, `download-started`, `download-finished` and `download-failed`.
-
-The same service supports the local base-image flow used by the Add device wizard:
-
-- `POST /image-maker/devices` registers a named device (it shows as offline, "Awaiting first boot") before any download.
-- `POST /image-maker/os-downloads` prepares the unmodified balenaOS download for a device type and version. The browser saves it once in the user's own folder and reuses it. `POST /image-maker/boot-patch` returns only the changed boot-partition blocks plus the SHA-256 of the original head, so the browser builds a flash-ready image from its local base without downloading the OS again.
-- Download links accept `?from=N` to resume after a dropped connection. A resume inside the boot partition is refused (HTTP 409) and the client restarts that file. Responses are gzip-compressed when the client accepts it.
-- Audit events also include `base-image-prepared`, `boot-patch` and `device-added`.
+- `POST /image-maker/devices` registers a named device (it shows as offline, "Awaiting first boot").
+- `POST /image-maker/config` returns the `config.json` for a fleet or one device.
+- `GET /image-maker/versions` lists the balenaOS versions of a device type.
+- Registering a device and generating a config each write one JSON line to the server log (`docker compose logs vector-server`) with `"audit":"device-config"`: who, the device type, the device and the sender address. Events are `device-added` and `config-generated`.
 
 ### Public HTTPS address
 
@@ -133,7 +120,7 @@ src/vector-server/
 │   ├── routes/             one file per area (adminDatabase, deviceUpdates, balenaOs, imageMaker, deltas ...)
 │   ├── middleware/         authorize (JWT), dosProtect (rate limits), cors
 │   ├── remoteAccess/       terminal and SFTP gateway (ssh2, tunnel, tickets, host-key pinning)
-│   ├── imageMaker/         streams configured OS images (unzip on the fly, patch the boot partition) and download tickets
+│   ├── imageMaker/         device registration, config.json generation and the balenaOS version list
 │   ├── util/s3/            S3 client and bucket names
 │   └── shared/             code also used by the UI; see below
 ├── test/                   fixtures and the opt-in real-API integration test

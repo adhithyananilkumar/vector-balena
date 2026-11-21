@@ -367,6 +367,17 @@ tunnel. The subsequent SSH connection still encrypts terminal/file payloads. The
 configuration routes `vpn.mgmt.edge-dev.mapped.com` to port `80`; it does not define the
 `tunnel.mgmt.edge-dev.mapped.com` Spectrum mapping.
 
+### Live reachability check
+
+`GET /remote/probe?deviceUuid=<uuid>` (bearer JWT, rate limited like the other remote routes) answers whether the
+device is reachable through its tunnel right now: `{ reachable, latencyMs?, checkedAt, reason? }`. The server resolves
+the user and authorizes the device the same way as a terminal session, then sends one CONNECT to
+`<uuid>.balena:<OPEN_BALENA_SSH_TARGET_PORT>` through the VPN proxy and closes the socket as soon as the proxy
+answers `200`. No SSH handshake runs, and nothing is sent to the device. The timeout is
+`min(OPEN_BALENA_REMOTE_CONNECT_TIMEOUT_MS, 6000)`. Results are shared per device for 5 s, and identity and
+authorization are cached per user, token and device for 60 s. The Vector UI uses it for **Check now** and for a
+15-second automatic check on an open device page.
+
 ## SSH host-key trust
 
 Strict verification is the default. Operators should configure pinned SHA-256 SSH host-key fingerprints, preferably per

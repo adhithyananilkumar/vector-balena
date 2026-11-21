@@ -17,6 +17,8 @@ import { resolveTransferPath } from './files';
 import { parseRemoteTarget, type ContainerSelector } from '../shared/remoteTarget';
 import { TicketLimitError, TicketStore, type RemoteTicket } from './tickets';
 import { resolveClientAddress } from './clientAddress';
+import { openTunnel } from './tunnel';
+import { AUTHORIZATION_CACHE_MS, DeviceProber } from './probe';
 import {
   contentDisposition,
   effectiveRequestOrigin,
@@ -145,6 +147,39 @@ export const createRemoteAccessBackend = (config = loadRemoteAccessConfig()): Re
       }
     },
   );
+
+  // Live reachability check used by the device status ("Check now").
+  const prober = new DeviceProber(
+    (identity, deviceUuid, signal) => openTunnel(config, identity, deviceUuid, signal),
+    (identity, deviceUuid, signal) => authorizeDevice(identity, config.apiUrl, deviceUuid, signal),
+    Math.min(config.connectTimeoutMs, 6_000),
+  );
+  const identities = new Map<string, { identity: RemoteIdentity; expires: number }>();
+  router.get('/remote/probe', ...dosProtect, authorize, async (req, res) => {
+    const deviceUuid = req.query.deviceUuid;
+    if (!isDeviceUuid(deviceUuid)) {
+      res.status(400).json({ error: 'invalid_request', message: 'A valid device UUID is required.' });
+      return;
+    }
+    try {
+      const token = req.get('Authorization') ?? '';
+      const now = Date.now();
+      let identity = identities.get(token);
+      if (!identity || identity.expires < now) {
+        if (identities.size > 5000) for (const [key, entry] of identities) if (entry.expires < now) identities.delete(key);
+        const controller = requestAbort(req, res);
+        identity = {
+          identity: await resolveRemoteIdentity(req, (res.locals as AuthorizedLocals).auth, config.apiUrl, controller.signal),
+          expires: now + AUTHORIZATION_CACHE_MS,
+        };
+        identities.set(token, identity);
+      }
+      res.set('Cache-Control', 'no-store');
+      res.json(await prober.probe(identity.identity, deviceUuid));
+    } catch (error) {
+      sendError(res, error, 403);
+    }
+  });
 
   router.put('/remote/sftp/upload', ...dosProtect, authorize, async (req, res) => {
     let ssh: SshLease | undefined;

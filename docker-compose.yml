@@ -176,6 +176,13 @@ services:
       VPN_PORT: 443 # also used in balena-io/open-balena-vpn: config/confd/templates/haproxy.cfg.tmpl
       VPN_SERVICE_REGISTER_INTERFACE: eth0 # ensure correct service instance IP is registered with the API
       PRODUCTION_MODE: "true" # always true, as there is no src folder, only build/src
+      # Device status: how fast a powered-off device is detected. The server drops a silent tunnel after
+      # 2 x VPN_KEEPALIVE_TIMEOUT seconds (40 s here, 120 s with the upstream default of 60), and the device
+      # restarts its tunnel after VPN_KEEPALIVE_TIMEOUT seconds without traffic. The ping frequency stays at the
+      # upstream 10 s, so devices use no more data than stock openBalena. An open device page in Vector also
+      # checks the device live through its tunnel every 15 s, so there it shows Offline within seconds.
+      VPN_KEEPALIVE_FREQUENCY: ${VPN_KEEPALIVE_FREQUENCY:-10}
+      VPN_KEEPALIVE_TIMEOUT: ${VPN_KEEPALIVE_TIMEOUT:-20}
     # CONNECT proxy used by the Vector UI server for terminal / SFTP access to devices (loopback only)
     ports:
       - "127.0.0.1:3128:3128"
